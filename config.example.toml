@@ -1,0 +1,22 @@
+# Copy to ~/.config/ov-mcp/config.toml and edit. That path is not in the
+# repository, so nothing about a particular deployment is committed.
+#
+# Every value here can also be given as an environment variable, which wins:
+#   base_url -> OV_BASE_URL, agent -> OV_AGENT, timeout -> OV_TIMEOUT,
+#   api_key  -> OV_API_KEY
+
+# Root of the OpenViking HTTP API.
+base_url = "http://openviking.example.lan:1933"
+
+# Sent as X-OpenViking-Agent, so writes can be attributed per machine.
+agent = "claude-code"
+
+# HTTP timeout in seconds. Semantic passes on write are queued, not awaited,
+# so this only needs to cover a single API call.
+timeout = 120
+
+# Optional. Preferred order is the environment, then this key, then the GNOME
+# keyring (service=openviking key=api). Leave it out and use the keyring where
+# one is available:
+#   secret-tool store --label='OpenViking API key' service openviking key api
+# api_key = "..."
