@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""MCP server exposing the OpenViking memory store on homelab to local agents.
+"""MCP server exposing an OpenViking memory store to local agents.
 
 OpenViking 0.2.6 ships no MCP module -- only the `ov` CLI and Python clients --
 so this wraps its HTTP API. Read tools cover the whole surface an agent needs to
@@ -88,7 +88,7 @@ def _api_key() -> str:
             return out.stdout.strip()
     except (OSError, subprocess.SubprocessError):
         pass
-    # Headless hosts (homelab) have no GNOME keyring; fall back to a 0600 file.
+    # Headless hosts have no GNOME keyring; fall back to a 0600 file.
     key_file = pathlib.Path(os.environ.get("OV_KEY_FILE", "~/.config/ov-mcp/key")).expanduser()
     try:
         if key_file.is_file():
@@ -189,7 +189,7 @@ def _fmt(result: Any, *, limit_chars: int = 6000) -> str:
 server = MCPServer(
     name="ov-memory",
     instructions=(
-        "Long-term memory for this machine's agents, stored in OpenViking on homelab. "
+        "Long-term memory for this machine's agents, stored in a shared OpenViking server. "
         "Search before answering questions about past work, infrastructure or decisions. "
         "Write only when the user asks you to remember something durable."
     ),

@@ -1,10 +1,10 @@
 # ov-mcp
 
-An MCP server that exposes the OpenViking memory store on homelab to local agents.
+An MCP server that exposes an OpenViking memory store to local agents.
 
 OpenViking ships no MCP module of its own — only the `ov` CLI and Python clients — so this wraps
-its HTTP API over stdio. It runs on both the Asahi MacBook and gaming-pc, in each case installed at
-`~/.local/lib/ov-mcp` and registered in `~/.claude.json` as the `ov-memory` server.
+its HTTP API over stdio. Install it wherever an agent needs the store — typically at
+`~/.local/lib/ov-mcp`, registered in `~/.claude.json` as the `ov-memory` server.
 
 ## Running it
 
