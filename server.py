@@ -68,6 +68,10 @@ import logging
 import httpx
 from mcp.server.mcpserver import MCPServer
 
+import friction
+
+SERVER_VERSION = "0.1.0"
+
 # httpx logs every request at INFO; on stdio transport that is just noise.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -589,6 +593,10 @@ server = MCPServer(
         "Write only when the user asks you to remember something durable."
     ),
 )
+
+# Spool one line per tool call, so a later pass can see which of these tools
+# agents struggle with. Off unless the marker file exists; see friction.py.
+friction.instrument(server, version=SERVER_VERSION)
 
 
 # --------------------------------------------------------------------------
