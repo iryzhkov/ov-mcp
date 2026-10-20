@@ -1,0 +1,9 @@
+# Example only. Install outside the checkout, owned by the runtime UID, mode 0600.
+# No environment or legacy stdio configuration is read.
+resource = "https://ov.mcp.ryzhkov.dev/mcp"
+issuer = "https://auth.example/application/o/ov-reader/"
+jwks_url = "https://auth.example/application/o/ov-reader/jwks/"
+backend_url = "http://openviking.example.lan:1933/api/v1"
+backend_secret_file = "/run/ov-http/backend.key"
+listen_host = "127.0.0.1"
+listen_port = 8098

@@ -1,0 +1,8 @@
+# Direct runtime dependencies qualified together by the synthetic acceptance suite.
+mcp==2.3.0
+PyJWT[crypto]==2.15.1
+cryptography==50.0.2
+httpx==0.28.1
+jsonschema==4.26.0
+starlette==1.9.0
+uvicorn==0.54.0

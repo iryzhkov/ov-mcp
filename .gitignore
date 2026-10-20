@@ -3,4 +3,7 @@ __pycache__/
 *.pyc
 server.py.bak*
 config.toml
+.chaldea/
+.scratch/
+.pytest_cache/
 key
