@@ -1,0 +1,5 @@
+**
+!Dockerfile
+!requirements-http.lock
+!ov_http/
+!ov_http/*.py

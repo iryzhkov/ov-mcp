@@ -10,9 +10,14 @@ from .config import Config
 def main():
     parser = argparse.ArgumentParser(description="Namespace-limited OpenViking HTTP MCP reader")
     parser.add_argument("--config", required=True, help="Absolute protected TOML file")
+    parser.add_argument("--check-config", action="store_true",
+                        help="Validate protected config and secret locally, without network I/O")
     args = parser.parse_args()
     try:
         config = Config.load(args.config)
+        if args.check_config:
+            config.secret()
+            return
         app = create_app(config)
     except (ValueError, TypeError, OSError, UnicodeError):
         parser.exit(2, "Invalid protected runtime configuration or secret file.\n")
