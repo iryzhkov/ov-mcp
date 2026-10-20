@@ -33,7 +33,7 @@ in `/api/v1`, with no userinfo, query or fragment. Use a trusted private transpo
 or HTTPS for the backend; it receives the owner-provided API key.
 
 Traefik later terminates public TLS and forwards `/mcp`,
-`/.well-known/oauth-protected-resource/mcp`, and optionally `/health`.
+`/.well-known/oauth-protected-resource/mcp`. Keep `/health` private.
 It must preserve the public Host and any Origin. The service checks exact public
 Host and Origin on all routes and ignores forwarded authority headers.
 Uvicorn proxy-header processing and access logs are disabled by the entrypoint.
@@ -212,4 +212,5 @@ synthetic OV fixture, locally generated RSA tokens and a locally trusted TLS JWK
 endpoint. It captures every backend method/path/query to assert scope before
 retrieval. It does not contact real OV or Authentik, enroll objects, exercise
 public HTTPS/Traefik or qualify a deployed image, host boundary or client renewal.
-No deployment or container recipe is included in this first source slice.
+The optional image recipe and its separate runtime qualification gates are in
+[http-image.md](http-image.md). Deployment source is owned by homelab-infra.
