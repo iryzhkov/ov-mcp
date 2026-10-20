@@ -1,0 +1,17 @@
+# Example only. Install outside the checkout, owned by the runtime UID, mode 0600.
+# No environment or legacy stdio configuration is read.
+resource = "https://ov.mcp.ryzhkov.dev/mcp"
+issuer = "https://auth.example/application/o/ov-reader/"
+jwks_url = "https://auth.example/application/o/ov-reader/jwks/"
+backend_url = "http://openviking.example.lan:1933/api/v1"
+backend_secret_file = "/run/ov-http/backend.key"
+listen_host = "127.0.0.1"
+listen_port = 8098
+
+# Default keeps deployed/legacy OpenViking 0.2.6 semantic calls disabled.
+semantic_profile = "disabled"
+# To opt in, replace the line above and add BOTH settings below:
+# semantic_profile = "namespace-directories-v1"
+# semantic_backend_revision = "68e66ec8998957e1af3cae8a661947fe77cd9578"
+# namespace_roots = ["viking://resources/namespaceA"]
+# Operator invariant: these actual namespace roots remain directories during service lifetime.

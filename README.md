@@ -2,6 +2,10 @@
 
 An MCP server that exposes an OpenViking memory store to local agents.
 
+For the separate stateless JWT-authorized HTTP reader, see [HTTP reader](docs/http-reader.md).
+It uses explicit protected runtime configuration and namespace grants; the stdio profile below
+retains its existing broad interactive behavior.
+
 OpenViking ships no MCP module of its own — only the `ov` CLI and Python clients — so this wraps
 its HTTP API over stdio. Install it wherever an agent needs the store — typically at
 `~/.local/lib/ov-mcp`, registered in `~/.claude.json` as the `ov-memory` server.
