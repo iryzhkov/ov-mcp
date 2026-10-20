@@ -15,7 +15,7 @@ from starlette.routing import Route
 
 from .auth import Principal, Refused, Verifier
 from .config import Config
-from .reader import Backend, Reader, SAFE_ERROR
+from .reader import Backend, BudgetExhausted, Reader, SAFE_ERROR
 
 STRING = {"type": "string", "minLength": 1, "maxLength": 1024}
 URI_ARG = {**STRING, "description": "Canonical viking://resources/... URI within this token's grants."}
@@ -202,7 +202,7 @@ def create_app(config: Config, *, jwks_ssl_context: ssl.SSLContext | None = None
             return result(value)
         except jsonschema.ValidationError:
             return result({"error": "Invalid tool arguments."}, True)
-        except (Refused, httpx.HTTPError, TimeoutError, ValueError, TypeError, RecursionError):
+        except (Refused, BudgetExhausted, httpx.HTTPError, TimeoutError, ValueError, TypeError, RecursionError):
             return result({"error": SAFE_ERROR}, True)
 
     server = Server("ov-http-reader", version="0.1.0", on_list_tools=list_tools, on_call_tool=call_tool,

@@ -65,7 +65,7 @@ def encode_json(value):
 
 
 class Fixture:
-    def __init__(self, root):
+    def __init__(self, root, layout="small"):
         self.root = root
         self.key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         self.other_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -85,6 +85,10 @@ class Fixture:
         self.semantic_many = False
         self.summary_mode = "normal"
         self.root_kind = {}
+        self.scan_fault = None
+        self.response_bytes = []
+        self.layout = layout
+        self.large_roots = []
         self.files = {
             A + "/note.md/part_1.md": "Alpha needle\n[[other]]\n[[secret]]\n[[" + B + "/secret.md]]",
             A + "/note.md/part_2.md": "Tail\nsecond needle",
@@ -99,6 +103,26 @@ class Fixture:
             A + "-neighbor/leak.md": "PREFIX DENIED needle",
             "viking://resources/outside.md/private/chunk.md": "CHUNK-ONLY needle",
         }
+        if layout == "flat":
+            self.files.update({A + f"/bulk/file_{i:03}.md": "needle [[" +
+                               (A + "/other.md" if i % 2 == 0 else "other") + "]]"
+                               for i in range(200)})
+            self.files[A + "/zzz/other.md"] = "unseen duplicate short name"
+        elif layout == "chunks":
+            self.files.update({A + f"/library/note_{i:03}.md/part_{j}.md":
+                               "needle [[" + A + "/other.md]]" for i in range(30) for j in range(3)})
+        elif layout == "huge":
+            self.files.update({A + f"/huge.md/part_{i:03}.md": "needle chunk" for i in range(180)})
+        elif layout in ("bytes", "byte-doc"):
+            prefix = "/bytes/file_" if layout == "bytes" else "/big.md/part_"
+            self.files.update({A + prefix + str(i) + ".md": "needle " + "x" * 180000 +
+                               " [[" + A + "/other.md]]" for i in range(8)})
+        elif layout == "list-bytes":
+            self.large_roots = [A + "/" + "r" * 760 + str(i) for i in range(8)]
+            self.files.update({root + f"/file_{i:03}.md": "needle"
+                               for root in self.large_roots for i in range(200)})
+        else:
+            assert layout == "small"
         self.initial = hashlib.sha256(json.dumps(self.files, sort_keys=True).encode()).hexdigest()
         self.cert, self.cert_key = self.certificate()
         cert_der = x509.load_pem_x509_certificate(self.cert.read_bytes()).public_bytes(serialization.Encoding.DER)
@@ -157,6 +181,14 @@ class Fixture:
             return JSONResponse({"error": SECRET + " private backend diagnostic"}, 500)
         if request.headers.get("x-api-key") != SECRET:
             return JSONResponse({}, 401)
+        if self.scan_fault and len(self.captured) == self.scan_fault["after"]:
+            if self.scan_fault["mode"] == "expiry":
+                await asyncio.sleep(max(0, self.scan_fault["expires"] - time.time() + 0.15))
+            elif self.scan_fault["mode"] == "error":
+                return JSONResponse({"error": SECRET}, 500)
+            else:
+                assert self.scan_fault["mode"] == "malformed"
+                return JSONResponse({"status": "ok", "result": {"isDir": "invalid"}})
         if self.root_kind.get(uri) == "missing":
             return JSONResponse({}, 404)
         is_dir = (self.root_kind.get(uri) != "file"
@@ -182,7 +214,9 @@ class Fixture:
             value = self.files.get(uri, "")
         else:
             return JSONResponse({}, 500)
-        return JSONResponse({"status": "ok", "result": value})
+        response = JSONResponse({"status": "ok", "result": value})
+        self.response_bytes.append(len(response.body))
+        return response
 
     async def semantic_backend(self, request):
         payload = await request.json()
@@ -268,12 +302,12 @@ class Fixture:
 
 
 @pytest_asyncio.fixture
-async def f(tmp_path):
+async def f(tmp_path, request):
     # A test may create files only under Chaldea's asserted scratch HOME.
     home = Path(os.environ["HOME"]).resolve()
     assert home.name == "home" and home.parent.name == ".scratch"
     assert tmp_path.resolve().is_relative_to(home)
-    fixture = Fixture(tmp_path)
+    fixture = Fixture(tmp_path, getattr(request, "param", "small"))
     backend = Starlette(routes=[Route("/api/v1/{path:path}", fixture.backend, methods=["GET", "POST"]),
                                 Route("/jwks", fixture.backend)])
     key_file = tmp_path / "backend.key"

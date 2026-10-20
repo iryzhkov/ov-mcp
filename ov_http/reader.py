@@ -1,18 +1,21 @@
 """Per-call scoped filesystem reader; never imports the broad stdio wrapper."""
 from pathlib import PurePosixPath
-import json
 import math
 import re
 
 import httpx
 
-from .auth import Principal, Refused, bounded_json, canonical, contains
+from .auth import Principal, Refused, canonical, contains, strict_json
 from .config import Config, SEMANTIC_PROFILE
 
 SAFE_ERROR = "Resource unavailable."
 DOC_EXTS = (".md", ".txt", ".yaml", ".yml", ".json", ".toml", ".rst", ".pdf", ".verbatim")
 HIDDEN = {".abstract.md", ".overview.md"}
 ARCHIVE = {"archive", "archived", "_archive"}
+
+
+class BudgetExhausted(Exception):
+    """Local request/data/traversal limit, never an authorization or backend error."""
 
 
 def natural(uri: str):
@@ -59,20 +62,33 @@ class Backend:
         self.requests = 0
         self.bytes = 0
 
-    async def _get(self, endpoint: str, uri: str, **params):
-        self.principal.require(uri)
-        self.requests += 1
-        if self.requests > 128:
-            raise Refused()
-        result = await bounded_json(self.client, "GET", self.config.backend_url + endpoint,
-                                    262144, params={"uri": uri, **params})
-        return self._unwrap(result)
+    def check_budget(self, request_limit: int = 128):
+        # Reserve one whole bounded response before starting I/O. This may stop
+        # with less than 256 KiB unused, but never reads past the aggregate cap.
+        if self.requests >= min(request_limit, 128) or self.bytes + 262144 > 1048576:
+            raise BudgetExhausted()
 
-    def _unwrap(self, result):
-        self.bytes += len(json.dumps(result).encode())
-        if self.bytes > 1048576 or not isinstance(result, dict) or result.get("status") != "ok":
+    async def _request(self, method: str, endpoint: str, **kwargs):
+        self.check_budget()
+        self.requests += 1
+        async with self.client.stream(method, self.config.backend_url + endpoint, **kwargs) as response:
+            if (response.status_code != 200
+                    or response.headers.get("content-encoding", "identity") != "identity"):
+                raise Refused()
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > 262144:
+                    raise Refused()
+        self.bytes += len(body)
+        result = strict_json(bytes(body))
+        if not isinstance(result, dict) or result.get("status") != "ok":
             raise Refused()
         return result.get("result")
+
+    async def _get(self, endpoint: str, uri: str, **params):
+        self.principal.require(uri)
+        return await self._request("GET", endpoint, params={"uri": uri, **params})
 
     async def semantic(self, kind: str, query: str) -> list[dict]:
         roots = self.principal.roots
@@ -92,12 +108,7 @@ class Backend:
             payload.update(mode="list", search_type="semantic")
         for root in roots:
             self.principal.require(root)
-        self.requests += 1
-        if self.requests > 128:
-            raise Refused()
-        response = await bounded_json(self.client, "POST", self.config.backend_url + "/search/" + kind,
-                                      262144, json=payload)
-        value = self._unwrap(response)
+        value = await self._request("POST", "/search/" + kind, json=payload)
         if (not isinstance(value, dict) or value.get("memories") != [] or value.get("skills") != []
                 or not isinstance(value.get("resources"), list) or len(value["resources"]) > 100):
             raise Refused()
@@ -152,35 +163,43 @@ class Reader:
         self.backend = backend
         self.principal = backend.principal
 
-    async def walk(self, root: str, max_depth: int = 12):
+    async def walk(self, root: str, max_depth: int = 12, *, request_limit: int = 128,
+                   atomic: bool = False):
         self.principal.require(root)
         nodes, pending, truncated = [], [(root, 0)], False
         seen = {root}
-        while pending:
-            uri, depth = pending.pop()
-            children = await self.backend.children(uri)
-            for child in reversed(children):
-                if child in seen:
-                    continue
-                seen.add(child)
-                if len(nodes) >= 256:
-                    return sorted(nodes, key=lambda n: natural(n["uri"])), True
-                entry = await self.backend.stat(child)
-                nodes.append(entry)
-                if entry["isDir"]:
-                    if depth + 1 < max_depth:
-                        pending.append((child, depth + 1))
-                    else:
-                        truncated = True
+        try:
+            while pending:
+                uri, depth = pending.pop()
+                self.backend.check_budget(request_limit)
+                children = await self.backend.children(uri)
+                for child in reversed(children):
+                    if child in seen:
+                        continue
+                    seen.add(child)
+                    if len(nodes) >= 256:
+                        return sorted(nodes, key=lambda n: natural(n["uri"])), True
+                    self.backend.check_budget(request_limit)
+                    entry = await self.backend.stat(child)
+                    nodes.append(entry)
+                    if entry["isDir"]:
+                        if depth + 1 < max_depth:
+                            pending.append((child, depth + 1))
+                        else:
+                            truncated = True
+        except BudgetExhausted:
+            if atomic:
+                raise
+            truncated = True
         return sorted(nodes, key=lambda n: natural(n["uri"])), truncated
 
     async def assemble(self, uri: str):
         st = await self.backend.stat(uri)
         if not st["isDir"]:
             return await self.backend.text(uri), [uri]
-        nodes, truncated = await self.walk(uri)
+        nodes, truncated = await self.walk(uri, atomic=True)
         if truncated:
-            raise Refused()
+            raise BudgetExhausted()
         sources, chunks = [], []
         for node in nodes:
             part = node["uri"]
@@ -224,13 +243,16 @@ class Reader:
 
     async def listing(self, uri: str | None, recursive: bool, limit: int, depth: int = 12):
         entries, truncated = [], False
-        for root in self.principal.scopes(uri):
-            if recursive:
-                nodes, cut = await self.walk(root, depth)
-                entries.extend(n["uri"] for n in nodes)
-                truncated |= cut
-            else:
-                entries.extend(await self.backend.children(root))
+        try:
+            for root in self.principal.scopes(uri):
+                if recursive:
+                    nodes, cut = await self.walk(root, depth)
+                    entries.extend(n["uri"] for n in nodes)
+                    truncated |= cut
+                else:
+                    entries.extend(await self.backend.children(root))
+        except BudgetExhausted:
+            truncated = True
         entries = sorted(set(entries), key=natural)
         return {"entries": entries[:limit], "truncated": truncated or len(entries) > limit}
 
@@ -243,16 +265,21 @@ class Reader:
                       "parts": len(files), "truncated": cut}
         return result
 
-    async def candidates(self, uri: str | None):
+    async def candidates(self, uri: str | None, *, request_limit: int = 128):
         nodes, truncated = [], False
-        for root in self.principal.scopes(uri):
-            st = await self.backend.stat(root)
-            if st["isDir"]:
-                children, cut = await self.walk(root)
-                nodes.extend(children)
-                truncated |= cut
-            else:
-                nodes.append(st)
+        try:
+            for root in self.principal.scopes(uri):
+                self.principal.require(root)
+                self.backend.check_budget(request_limit)
+                st = await self.backend.stat(root)
+                if st["isDir"]:
+                    children, cut = await self.walk(root, request_limit=request_limit)
+                    nodes.extend(children)
+                    truncated |= cut
+                else:
+                    nodes.append(st)
+        except BudgetExhausted:
+            truncated = True
         return nodes, truncated
 
     async def glob(self, pattern: str, uri: str | None, limit: int):
@@ -266,14 +293,19 @@ class Reader:
 
     async def grep(self, pattern: str, uri: str | None, case_insensitive: bool,
                    limit: int, group: bool, include_archived: bool):
-        nodes, truncated = await self.candidates(uri)
+        # Leave half the request allowance for reading discovered files.
+        nodes, truncated = await self.candidates(uri, request_limit=64)
         matches = {}
         needle = pattern.casefold() if case_insensitive else pattern
         for node in nodes:
             path = node["uri"]
             if node["isDir"] or (not include_archived and archived(path)):
                 continue
-            text = await self.backend.text(path)
+            try:
+                text = await self.backend.text(path)
+            except BudgetExhausted:
+                truncated = True
+                break
             haystack = text.casefold() if case_insensitive else text
             if needle in haystack:
                 root = document(path, self.principal) if group else path
@@ -306,7 +338,9 @@ class Reader:
     async def relations(self, uri: str):
         self.principal.require(uri)
         target_text, _ = await self.assemble(uri)
-        nodes, truncated = await self.candidates(None)
+        # Reserve requests for complete backlink documents after discovery.
+        nodes, truncated = await self.candidates(None, request_limit=64)
+        names_complete = not truncated
         docs = sorted({document(n["uri"], self.principal) for n in nodes
                        if not n["isDir"] and not n["uri"].rsplit("/", 1)[-1].startswith(".")})
         target = document(uri, self.principal)
@@ -324,15 +358,19 @@ class Reader:
                         outgoing.add(name)
                 except Refused:
                     pass
-            elif len(by_name.get(name.removesuffix(".md"), [])) == 1:
+            elif names_complete and len(by_name.get(name.removesuffix(".md"), [])) == 1:
                 outgoing.add(by_name[name.removesuffix(".md")][0])
         backlinks = []
         for doc in docs:
             if doc == target:
                 continue
-            text, _ = await self.assemble(doc)
+            try:
+                text, _ = await self.assemble(doc)
+            except BudgetExhausted:
+                truncated = True
+                break
             links = [x.removesuffix(".md") for x in wikilinks(text)]
-            if ((len(by_name.get(target_name, [])) == 1 and target_name in links)
+            if ((names_complete and len(by_name.get(target_name, [])) == 1 and target_name in links)
                     or target.removesuffix(".md") in links):
                 backlinks.append(doc)
         return {"uri": uri, "wikilinks": sorted(outgoing), "backlinks": backlinks,

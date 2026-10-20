@@ -173,16 +173,26 @@ discovery cannot be constrained first. Structured results never contain denied
 targets or counts. Resolution is bounded and approximate: only uniquely named
 permitted documents resolve by short name. References already written in permitted
 document prose remain in that prose; this service does not redact them.
+If discovery is truncated, short-name links are not resolved because an unseen
+document could make the name ambiguous. Explicit URI links and backlinks from
+fully read documents can still be returned with `truncated: true`.
 
 Authentication has a five-second total deadline, including any wait for the JWKS
 refresh lock. A call has a 20-second deadline inside a 25-second authenticated
 HTTP request deadline. The
 entrypoint limits concurrent connections/tasks to 64. A call has at most 128 backend requests, 256 traversal nodes,
 12 levels, 256 children per listing, 256 KiB per upstream response and 1 MiB of
-aggregate decoded backend data. Tool output is at most 48 KiB; read text is at
+aggregate uncompressed JSON response-body data. Each request reserves one full 256 KiB
+response allowance before I/O, so a scan may stop with less than that allowance
+unused. Tool output is at most 48 KiB; read text is at
 most 24,000 characters. Upstream redirects and compressed responses are refused.
-Traversal and result limits report explicit truncation. An incomplete document
-assembly fails rather than claiming full content. Denied, missing, malformed
+Traversal, request and aggregate-data budgets return safe partial scan results
+with explicit truncation. Grep and relations spend at most the first 64 requests
+on discovery to leave allowance for content. Partial sizes, matching-part counts,
+links and backlinks cover only validated observed records, not a complete scan.
+A backlink document contributes nothing until its assembly is complete. An
+incomplete requested document assembly fails rather than claiming full content.
+Only local budget exhaustion produces partial results; denied, missing, malformed
 upstream and backend failures return the same safe tool error. This is response
 equivalence, not a timing-equivalence claim. Cancellation propagates through
 the HTTP disconnect and async HTTP calls. A later MCP cancellation notification
