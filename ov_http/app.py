@@ -22,11 +22,13 @@ URI_ARG = {**STRING, "description": "Canonical viking://resources/... URI within
 LIMIT = {"type": "integer", "minimum": 1, "maximum": 100}
 BOOL = {"type": "boolean"}
 SPECS = {
-    "memory_search": ("Unavailable until backend semantic isolation is qualified. Never searches globally.",
-                      {"query": STRING, "scope": URI_ARG, "limit": LIMIT, "group": BOOL,
+    "memory_search": ("Scoped semantic search requires the operator-pinned namespace profile. Bounded, incomplete batch.",
+                      {"query": STRING, "scope": {**URI_ARG, "description": "Optional exact granted namespace assertion; all grants remain queried."},
+                       "limit": LIMIT, "group": BOOL,
                        "include_archived": BOOL}, ["query"]),
-    "memory_find": ("Unavailable until backend semantic isolation is qualified.",
-                    {"query": STRING, "scope": URI_ARG, "limit": LIMIT, "group": BOOL,
+    "memory_find": ("Scoped semantic find requires the operator-pinned namespace profile. Bounded, incomplete batch.",
+                    {"query": STRING, "scope": {**URI_ARG, "description": "Optional exact granted namespace assertion; all grants remain queried."},
+                       "limit": LIMIT, "group": BOOL,
                      "include_archived": BOOL}, ["query"]),
     "memory_grep": ("Literal substring search over authorized files only. Bounded; grouped by document by default.",
                     {"pattern": STRING, "uri": URI_ARG, "case_insensitive": BOOL, "limit": LIMIT,
@@ -163,12 +165,17 @@ def create_app(config: Config, *, jwks_ssl_context: ssl.SSLContext | None = None
             for key in ("uri", "scope"):
                 if key in arguments:
                     principal.require(arguments[key])
-            if name in ("memory_search", "memory_find"):
-                return result({"error": "Scoped semantic search unavailable: backend expands related documents "
-                              "outside target_uri. Use memory_grep or memory_glob."}, True)
+            if name in ("memory_search", "memory_find") and config.semantic_profile == "disabled":
+                return result({"error": "Scoped semantic search unavailable: pinned namespace profile required. "
+                              "Use memory_grep or memory_glob."}, True)
             reader = Reader(Backend(config, principal, backend_client))
             async with asyncio.timeout(20):
-                if name == "memory_ls":
+                if name in ("memory_search", "memory_find"):
+                    value = await reader.semantic(name.removeprefix("memory_"), arguments["query"],
+                                                  arguments.get("scope"), arguments.get("limit", 10),
+                                                  arguments.get("group", True),
+                                                  arguments.get("include_archived", False))
+                elif name == "memory_ls":
                     value = await reader.listing(arguments.get("uri"), arguments.get("recursive", False),
                                                  arguments.get("limit", 50))
                 elif name == "memory_tree":

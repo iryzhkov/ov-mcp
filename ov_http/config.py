@@ -1,6 +1,7 @@
 """Explicit, protected configuration for the independent HTTP reader."""
 from dataclasses import dataclass
 import os
+import re
 from pathlib import Path
 import stat
 import tomllib
@@ -35,6 +36,10 @@ def fixed_url(value: str, *, https: bool = True) -> str:
     return value
 
 
+SEMANTIC_REVISION = "68e66ec8998957e1af3cae8a661947fe77cd9578"
+SEMANTIC_PROFILE = "namespace-directories-v1"
+
+
 @dataclass(frozen=True)
 class Config:
     resource: str
@@ -44,6 +49,9 @@ class Config:
     backend_secret_file: str
     listen_host: str = "127.0.0.1"
     listen_port: int = 8098
+    semantic_profile: str = "disabled"
+    semantic_backend_revision: str = ""
+    namespace_roots: tuple[str, ...] = ()
 
     def __post_init__(self):
         for value in (self.resource, self.issuer, self.jwks_url):
@@ -59,6 +67,22 @@ class Config:
             raise ValueError("invalid listen port")
         if not Path(self.backend_secret_file).is_absolute():
             raise ValueError("secret file path must be absolute")
+        if self.semantic_profile not in ("disabled", SEMANTIC_PROFILE):
+            raise ValueError("unknown semantic profile")
+        roots = self.namespace_roots
+        if not isinstance(roots, (list, tuple)) or len(roots) > 16:
+            raise ValueError("invalid namespace admission")
+        if any(not isinstance(r, str) or not re.fullmatch(
+                r"viking://resources/[A-Za-z0-9_@+,=-][A-Za-z0-9_.@+,=-]{0,127}", r) for r in roots):
+            raise ValueError("admit explicit top-level namespace directories only")
+        if len(set(roots)) != len(roots):
+            raise ValueError("duplicate namespace admission")
+        object.__setattr__(self, "namespace_roots", tuple(sorted(roots)))
+        if self.semantic_profile == "disabled":
+            if self.semantic_backend_revision != "" or roots:
+                raise ValueError("disabled profile cannot select semantic backend or namespaces")
+        elif self.semantic_backend_revision != SEMANTIC_REVISION or not roots:
+            raise ValueError("semantic profile requires exact backend revision and namespace admission")
 
     @property
     def origin(self) -> str:

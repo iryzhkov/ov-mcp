@@ -1,12 +1,13 @@
 """Per-call scoped filesystem reader; never imports the broad stdio wrapper."""
 from pathlib import PurePosixPath
 import json
+import math
 import re
 
 import httpx
 
 from .auth import Principal, Refused, bounded_json, canonical, contains
-from .config import Config
+from .config import Config, SEMANTIC_PROFILE
 
 SAFE_ERROR = "Resource unavailable."
 DOC_EXTS = (".md", ".txt", ".yaml", ".yml", ".json", ".toml", ".rst", ".pdf", ".verbatim")
@@ -52,7 +53,7 @@ def wikilinks(text: str) -> list[str]:
 
 
 class Backend:
-    """Only these three typed REST operations exist. Every operation rechecks ACL/expiry."""
+    """Fixed typed REST operations; every operation rechecks grants and expiry."""
     def __init__(self, config: Config, principal: Principal, client: httpx.AsyncClient):
         self.config, self.principal, self.client = config, principal, client
         self.requests = 0
@@ -65,10 +66,53 @@ class Backend:
             raise Refused()
         result = await bounded_json(self.client, "GET", self.config.backend_url + endpoint,
                                     262144, params={"uri": uri, **params})
+        return self._unwrap(result)
+
+    def _unwrap(self, result):
         self.bytes += len(json.dumps(result).encode())
         if self.bytes > 1048576 or not isinstance(result, dict) or result.get("status") != "ok":
             raise Refused()
         return result.get("result")
+
+    async def semantic(self, kind: str, query: str) -> list[dict]:
+        roots = self.principal.roots
+        if (self.config.semantic_profile != SEMANTIC_PROFILE or kind not in ("search", "find")
+                or not query.strip() or not roots
+                or any(r not in self.config.namespace_roots for r in roots)):
+            raise Refused()
+        # Namespace types must remain immutable through the following POST.
+        # This preflight rejects missing/file roots, but is not an atomic lock.
+        for root in roots:
+            if not (await self.stat(root))["isDir"]:
+                raise Refused()
+        payload = {"query": query, "target_uri": list(roots), "context_type": "resource",
+                   "limit": 100, "read_content": False, "include_provenance": False,
+                   "telemetry": False}
+        if kind == "search":
+            payload.update(mode="list", search_type="semantic")
+        for root in roots:
+            self.principal.require(root)
+        self.requests += 1
+        if self.requests > 128:
+            raise Refused()
+        response = await bounded_json(self.client, "POST", self.config.backend_url + "/search/" + kind,
+                                      262144, json=payload)
+        value = self._unwrap(response)
+        if (not isinstance(value, dict) or value.get("memories") != [] or value.get("skills") != []
+                or not isinstance(value.get("resources"), list) or len(value["resources"]) > 100):
+            raise Refused()
+        hits = value["resources"]
+        for hit in hits:
+            if not isinstance(hit, dict):
+                raise Refused()
+            self.principal.require(hit.get("uri"))
+            score = hit.get("score")
+            if (hit.get("context_type") != "resource" or type(hit.get("level")) is not int
+                    or hit["level"] not in (0, 1, 2) or type(score) not in (int, float)
+                    or not math.isfinite(score) or abs(score) > 1e12
+                    or not isinstance(hit.get("abstract"), str) or len(hit["abstract"]) > 8192):
+                raise Refused()
+        return hits
 
     async def stat(self, uri: str) -> dict:
         result = await self._get("/fs/stat", uri)
@@ -238,6 +282,26 @@ class Reader:
         results = list(matches.values())
         return {"matches": results[:limit], "truncated": truncated or len(results) > limit,
                 "mode": "literal substring; no regex"}
+
+    async def semantic(self, kind: str, query: str, scope: str | None, limit: int,
+                       group: bool, include_archived: bool):
+        # Retain the old argument as an assertion, never a backend target selector.
+        if scope is not None and scope not in self.principal.roots:
+            raise Refused()
+        hits = await self.backend.semantic(kind, query)
+        matches = {}
+        for hit in sorted(hits, key=lambda h: h["score"], reverse=True):
+            uri = hit["uri"]
+            if not include_archived and archived(uri):
+                continue
+            target = document(uri, self.principal) if group else uri
+            entry = matches.setdefault(target, {"uri": target, "score": hit["score"],
+                                                 "abstract": hit["abstract"], "matching_parts": 0})
+            entry["matching_parts"] += 1
+        values = list(matches.values())
+        return {"matches": values[:limit], "returned": min(len(values), limit),
+                "truncated": len(hits) == 100 or len(values) > limit, "complete": False,
+                "batch_limit": 100, "matching_parts_basis": "returned scoped batch only"}
 
     async def relations(self, uri: str):
         self.principal.require(uri)

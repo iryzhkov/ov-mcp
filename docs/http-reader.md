@@ -24,7 +24,8 @@ a trailing newline. The service does not invoke a keyring or read OV environment
 variables or legacy user configuration.
 
 Config keys are `resource`, `issuer`, `jwks_url`, `backend_url`,
-`backend_secret_file`, `listen_host` and `listen_port`. Defaults are loopback
+`backend_secret_file`, `listen_host` and `listen_port`, plus the optional semantic
+profile keys below. Defaults are loopback
 and port 8098. The canonical public resource must end in exactly `/mcp`; the
 issuer is exact, HTTPS and includes its trailing slash. JWKS is a pinned HTTPS
 URL, never discovered from a bearer. Backend URL is a fixed HTTP(S) address ending
@@ -93,8 +94,65 @@ error without any backend request. OpenViking 0.2.6's
 [matched-context expansion](https://github.com/volcengine/OpenViking/blob/v0.2.6/openviking/retrieve/hierarchical_retriever.py#L336)
 reads related abstracts without the target directory filter. Sending
 `target_uri` and filtering the result would not establish scope isolation.
-A later backend capability with pre-retrieval ACL enforcement is required to
-enable semantic search.
+This remains the default. An explicit source-pinned profile is described below;
+no live upgrade is performed by this adapter.
+
+### Opt-in semantic profile
+
+Only an operator-qualified backend at exact source revision
+`68e66ec8998957e1af3cae8a661947fe77cd9578` may use:
+
+```toml
+semantic_profile = "namespace-directories-v1"
+semantic_backend_revision = "68e66ec8998957e1af3cae8a661947fe77cd9578"
+namespace_roots = ["viking://resources/namespaceA", "viking://resources/namespaceB"]
+```
+
+Unknown profiles/revisions, missing admission, duplicate roots, nested/file grants,
+and mixed disabled/enabled settings are refused. Admission is a protected allowlist
+of explicit top-level `viking://resources/<namespace>` directory roots. Each token
+must grant only admitted roots, and only its granted roots become HTTP targets.
+Before any semantic POST, every granted root must stat as an existing directory.
+The operator must keep namespace root types immutable for the service lifetime.
+The stat and POST are separate operations; this is an explicit deployment invariant,
+not an atomic type check or generic file ACL. Configuration pins an expected
+contract; it does not attest or inspect the running backend revision.
+
+Calls use only POST `/search/find` or `/search/search` with fixed resource context,
+explicit namespace targets, bounded limit, content hydration/provenance off and
+search list mode. No session, image, caller filter, wildcard, cursor or default
+scope is forwarded. The optional existing tool `scope` argument must exactly match
+a granted namespace; it is an assertion only. The query always includes all token
+grants, so caller input never chooses a file target or backend authority.
+
+Up to 100 scoped hits are fetched per call. Archive hiding and document grouping
+operate on that bounded authorized batch. Scores/previews describe returned hits;
+matching-part counts cover only the batch. No complete matching count is reported,
+and `complete` is always false. `truncated` marks batch/output reduction. There is
+no pagination/cache or cursor. Returned resource URIs are independently validated;
+a malformed or out-of-grant response fails the entire call. This defense does not
+replace the backend filtering requirement. Stored relationships remain unavailable;
+prose references already inside an authorized preview are not scrubbed.
+
+Pinned source evidence places target PathScope filters before vector ranking and
+counts and has no related-abstract expansion in list retrieval. Directory summary
+missing/empty cases stay local. Relevant source at the exact revision is
+`server/routers/search.py` FindRequest/SearchRequest and find/search routes;
+`storage/viking_fs/_semantic.py` abstract/_read_abstract_file/search;
+`retrieve/hierarchical_retriever.py` retrieve/_convert_to_matched_contexts;
+`storage/viking_vector_index_backend.py` _build_scope_filter; and
+`storage/vectordb_adapters/base.py` query/_compile_filter, all under `openviking/`.
+Separate pinned-source AST fixtures exercised those method bodies with inert
+storage/model boundaries. The SDK suite exercises the complete adapter HTTP path
+against a capturing synthetic backend that asserts the fixed request fields and
+scopes candidates before summary/content/rank/count stages. These are paired pieces
+of evidence, not execution of the actual upstream HTTP server or native engine.
+The suite also covers missing/empty directory summaries, L0/L1 previews, chunk
+parts, archives, same-subject A/B concurrency, failed preflight, poisoned responses
+and bounded/failed/redirected POSTs. Full relationships remain the existing scoped
+wikilink scan; a synthetic relations field is not proof of a real backlink engine.
+This profile requires native vector/backend and runtime qualification before
+deployment; synthetic captures cannot establish that.
 
 `memory_grep` uses bounded literal substring matching, not arbitrary regular
 expressions. `memory_glob` matches filenames or relative paths. Both enumerate
@@ -133,6 +191,11 @@ in-flight HTTP request for immediate cancellation. All calls still have the
 20-second deadline.
 
 ## Qualification boundary
+
+Install test dependencies with `uv pip install -r requirements-http-test.lock`
+and run `python -B -m pytest -q -p no:cacheprovider --basetemp "$HOME/pytest" tests`
+inside an agent-a Chaldea job with asserted scratch HOME/TMPDIR. The test lock pins
+the complete runtime and test closure; its input remains `requirements-http-test.txt`.
 
 The synthetic suite uses the official SDK over real loopback HTTP, an immutable
 synthetic OV fixture, locally generated RSA tokens and a locally trusted TLS JWKS

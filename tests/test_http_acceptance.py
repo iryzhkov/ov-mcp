@@ -79,6 +79,12 @@ class Fixture:
         self.poison = False
         self.slow = False
         self.bad_backend = ""
+        self.semantic_trace = []
+        self.semantic_bad = ""
+        self.semantic_response_mode = ""
+        self.semantic_many = False
+        self.summary_mode = "normal"
+        self.root_kind = {}
         self.files = {
             A + "/note.md/part_1.md": "Alpha needle\n[[other]]\n[[secret]]\n[[" + B + "/secret.md]]",
             A + "/note.md/part_2.md": "Tail\nsecond needle",
@@ -136,6 +142,8 @@ class Fixture:
             if self.jwks_mode == "large":
                 return JSONResponse({"keys": [], "padding": "x" * 70000})
             return JSONResponse({"keys": self.keys}, self.jwks_status)
+        if request.method == "POST":
+            return await self.semantic_backend(request)
         uri = request.query_params.get("uri")
         self.captured.append((request.method, request.url.path, dict(request.query_params),
                               request.headers.get("x-api-key")))
@@ -149,8 +157,11 @@ class Fixture:
             return JSONResponse({"error": SECRET + " private backend diagnostic"}, 500)
         if request.headers.get("x-api-key") != SECRET:
             return JSONResponse({}, 401)
-        is_dir = any(p.startswith(str(uri) + "/") for p in self.files)
-        exists = uri in self.files or is_dir
+        if self.root_kind.get(uri) == "missing":
+            return JSONResponse({}, 404)
+        is_dir = (self.root_kind.get(uri) != "file"
+                  and any(p.startswith(str(uri) + "/") for p in self.files))
+        exists = uri in self.files or is_dir or self.root_kind.get(uri) == "file"
         if not exists:
             return JSONResponse({"error": "different missing details"}, 404)
         if request.url.path.endswith("/stat"):
@@ -173,8 +184,71 @@ class Fixture:
             return JSONResponse({}, 500)
         return JSONResponse({"status": "ok", "result": value})
 
+    async def semantic_backend(self, request):
+        payload = await request.json()
+        self.captured.append((request.method, request.url.path, payload,
+                              request.headers.get("x-api-key")))
+        kind = request.url.path.rsplit("/", 1)[-1]
+        roots = payload.get("target_uri")
+        assert isinstance(roots, list) and roots and roots == sorted(set(roots))
+        assert all(root in (A, B) for root in roots)
+        expected = {"query": payload["query"], "target_uri": roots, "context_type": "resource",
+                    "limit": 100, "read_content": False, "include_provenance": False, "telemetry": False}
+        if kind == "search":
+            expected.update(mode="list", search_type="semantic")
+        assert payload == expected and kind in ("search", "find")
+        assert request.headers.get("x-api-key") == SECRET
+        if self.semantic_response_mode == "redirect":
+            return JSONResponse({}, 302, headers={"Location": self.redirect_url})
+        if self.semantic_response_mode == "large":
+            return JSONResponse({"padding": "x" * 270000})
+        if self.semantic_response_mode == "error":
+            return JSONResponse({"error": SECRET}, 500)
+        trace = {"query": payload["query"], "targets": roots, "summary_reads": [], "record_reads": []}
+        self.semantic_trace.append(trace)
+        if self.slow:
+            await asyncio.sleep(1)
+        # The synthetic engine receives explicit scope before summaries, record
+        # content, ranking, counts or links. It is not a native vector proof.
+        if kind == "search":
+            trace["summary_reads"].append(roots[0] + "/.abstract.md")
+            summary = "" if self.summary_mode in ("missing", "empty") else "Allowed summary"
+            trace["summary_mode"] = self.summary_mode
+            assert isinstance(summary, str)
+        indexed = [(B + "/secret.md", 999, 2), (B + "/.abstract.md", 998, 0),
+                   (B + "/.overview.md", 997, 1), (A + "-neighbor/leak.md", 996, 2),
+                   (A + "/archive/old.md", 95, 2), (A + "/note.md/part_1.md", 90, 2),
+                   (A + "/note.md/part_2.md", 89, 2), (A + "/note.md/.abstract.md", 88, 0),
+                   (A + "/note.md/.overview.md", 87, 1), (A + "/.abstract.md", 85, 0),
+                   (A + "/.overview.md", 84, 1), (A + "/other.md", 80, 2)]
+        if self.semantic_many:
+            indexed.extend((A + "/extra_" + str(i) + ".md", 500 + i, 2) for i in range(150))
+        scoped = [(uri, score, level) for uri, score, level in indexed
+                  if any(uri == root or uri.startswith(root + "/") for root in roots)]
+        resources = []
+        for uri, score, level in scoped:
+            trace["record_reads"].append(uri)
+            resources.append({"uri": uri, "context_type": "resource", "level": level, "score": score,
+                              "abstract": "permitted prose [[" + B + "/secret.md]]" if uri.startswith(A + "/")
+                              else "B preview", "relations": [B + "/secret.md"]})
+        resources.sort(key=lambda hit: hit["score"], reverse=True)
+        trace["scoped_count_before_limit"] = len(resources)
+        resources = resources[:payload["limit"]]
+        if self.semantic_bad:
+            resources.append({"uri": self.semantic_bad, "context_type": "resource", "level": 2,
+                              "score": 1, "abstract": "poison"})
+        trace["returned_uris"] = [r["uri"] for r in resources]
+        return JSONResponse({"status": "ok", "result": {"resources": resources, "memories": [],
+                              "skills": [], "total": len(resources),
+                              "query_plan": {"private": SECRET, "uri": B}}})
+
     def assert_capture(self, roots=(A,)):
         for method, path, params, secret in self.captured:
+            if method == "POST":
+                assert path in ("/api/v1/search/find", "/api/v1/search/search")
+                assert params["target_uri"] and all(r in roots for r in params["target_uri"])
+                assert secret == SECRET
+                continue
             assert method == "GET"
             assert path in ("/api/v1/fs/stat", "/api/v1/fs/ls", "/api/v1/content/read")
             uri = params["uri"]
@@ -200,7 +274,7 @@ async def f(tmp_path):
     assert home.name == "home" and home.parent.name == ".scratch"
     assert tmp_path.resolve().is_relative_to(home)
     fixture = Fixture(tmp_path)
-    backend = Starlette(routes=[Route("/api/v1/{path:path}", fixture.backend),
+    backend = Starlette(routes=[Route("/api/v1/{path:path}", fixture.backend, methods=["GET", "POST"]),
                                 Route("/jwks", fixture.backend)])
     key_file = tmp_path / "backend.key"
     key_file.write_text(SECRET)
@@ -219,6 +293,12 @@ async def f(tmp_path):
             fixture.config = config
             yield fixture
     assert fixture.initial == hashlib.sha256(json.dumps(fixture.files, sort_keys=True).encode()).hexdigest()
+    if any(method == "POST" for method, _, _, _ in fixture.captured):
+        capture = {"test": tmp_path.name, "backend_calls": [(m, p, args) for m, p, args, _ in fixture.captured],
+                   "semantic_trace": fixture.semantic_trace, "fixture_unchanged": True,
+                   "response_poison": fixture.semantic_bad}
+        with (home / "semantic-http-captures.jsonl").open("a") as output:
+            output.write(json.dumps(capture) + "\n")
 
 
 async def call(session, name, **arguments):

@@ -230,6 +230,8 @@ class Verifier:
             roots = tuple(sorted(canonical(r) for r in grants))
             if any(contains(a, b) for i, a in enumerate(roots) for b in roots[i + 1:]):
                 raise Refused()
+            if self.config.namespace_roots and any(r not in self.config.namespace_roots for r in roots):
+                raise Refused()
             digest = hashlib.sha256(json.dumps(roots, separators=(",", ":")).encode()).hexdigest()
             return Principal(subject, roots, expires, digest)
         except (ValueError, TypeError, KeyError, RecursionError, jwt.PyJWTError,
