@@ -111,60 +111,78 @@ class Verifier:
         self.valid_until = 0.0
         self.next_refresh = 0.0
         self.lock = asyncio.Lock()
+        self.refresh_task: asyncio.Task[bool] | None = None
+        self.closed = False
 
     async def key(self, kid: str):
         async with self.lock:
+            if self.closed:
+                raise Refused()
             now = time.monotonic()
             if now < self.valid_until and kid in self.keys:
                 return self.keys[kid]
-            # Unknown kids cannot force unbounded network requests. Refresh failures
-            # also enter this cooldown; stale keys are never used beyond their TTL.
-            if now < self.next_refresh:
-                raise Refused()
-            self.next_refresh = now + 5
-            try:
-                async with asyncio.timeout(5):
-                    doc = await bounded_json(self.client, "GET", self.config.jwks_url, 65536)
-                if not isinstance(doc, dict) or set(doc) != {"keys"}:
+            if self.refresh_task is None or self.refresh_task.done():
+                if now < self.next_refresh:
                     raise Refused()
-                records = doc["keys"]
-                if not isinstance(records, list) or not 1 <= len(records) <= 16:
-                    raise Refused()
-                keys = {}
-                for record in records:
-                    if not isinstance(record, dict):
-                        raise Refused()
-                    key_id = record.get("kid")
-                    if (not isinstance(key_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", key_id)
-                            or key_id in keys or record.get("kty") != "RSA"
-                            or record.get("alg") != "RS256" or record.get("use", "sig") != "sig"
-                            or record.get("key_ops", ["verify"]) != ["verify"]
-                            or set(record) - {"kid", "kty", "alg", "use", "key_ops", "n", "e",
-                                              "x5c", "x5t", "x5t#S256"}
-                            or not isinstance(record.get("n"), str) or len(record["n"]) > 1400
-                            or not isinstance(record.get("e"), str) or len(record["e"]) > 8):
-                        raise Refused()
-                    # Authentik includes certificate/thumbprint metadata. Bound
-                    # and ignore it; only pinned-JWKS RSA n/e supply key material.
-                    chain = record.get("x5c", [])
-                    if (not isinstance(chain, list) or len(chain) > 4
-                            or any(not isinstance(c, str) or len(c) > 8192 for c in chain)
-                            or any(not isinstance(record[k], str) or len(record[k]) > 128
-                                   for k in ("x5t", "x5t#S256") if k in record)):
-                        raise Refused()
-                    public = {k: record[k] for k in ("kty", "n", "e")}
-                    key = jwt.PyJWK.from_dict(public, algorithm="RS256").key
-                    if not 2048 <= key.key_size <= 8192:
-                        raise Refused()
-                    keys[key_id] = key
-                self.keys = keys
-                self.valid_until = time.monotonic() + 60
-            except (ValueError, TypeError, KeyError, RecursionError, httpx.HTTPError,
-                    jwt.PyJWTError, TimeoutError):
-                raise Refused() from None
-            if kid not in self.keys:
+                self.next_refresh = now + 5
+                # Only public JWKS I/O survives a caller's cancellation.
+                self.refresh_task = asyncio.create_task(self._refresh())
+            refresh = self.refresh_task
+        if not await asyncio.shield(refresh):
+            raise Refused()
+        if time.monotonic() >= self.valid_until or kid not in self.keys:
+            raise Refused()
+        return self.keys[kid]
+
+    async def close(self):
+        self.closed = True
+        if self.refresh_task is not None:
+            self.refresh_task.cancel()
+            await asyncio.gather(self.refresh_task, return_exceptions=True)
+
+    async def _refresh(self) -> bool:
+        try:
+            async with asyncio.timeout(5):
+                doc = await bounded_json(self.client, "GET", self.config.jwks_url, 65536)
+            if not isinstance(doc, dict) or set(doc) != {"keys"}:
                 raise Refused()
-            return self.keys[kid]
+            records = doc["keys"]
+            if not isinstance(records, list) or not 1 <= len(records) <= 16:
+                raise Refused()
+            keys = {}
+            for record in records:
+                if not isinstance(record, dict):
+                    raise Refused()
+                key_id = record.get("kid")
+                if (not isinstance(key_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", key_id)
+                        or key_id in keys or record.get("kty") != "RSA"
+                        or record.get("alg") != "RS256" or record.get("use", "sig") != "sig"
+                        or record.get("key_ops", ["verify"]) != ["verify"]
+                        or set(record) - {"kid", "kty", "alg", "use", "key_ops", "n", "e",
+                                          "x5c", "x5t", "x5t#S256"}
+                        or not isinstance(record.get("n"), str) or len(record["n"]) > 1400
+                        or not isinstance(record.get("e"), str) or len(record["e"]) > 8):
+                    raise Refused()
+                # Authentik includes certificate/thumbprint metadata. Bound
+                # and ignore it; only pinned-JWKS RSA n/e supply key material.
+                chain = record.get("x5c", [])
+                if (not isinstance(chain, list) or len(chain) > 4
+                        or any(not isinstance(c, str) or len(c) > 8192 for c in chain)
+                        or any(not isinstance(record[k], str) or len(record[k]) > 128
+                               for k in ("x5t", "x5t#S256") if k in record)):
+                    raise Refused()
+                public = {k: record[k] for k in ("kty", "n", "e")}
+                key = jwt.PyJWK.from_dict(public, algorithm="RS256").key
+                if not 2048 <= key.key_size <= 8192:
+                    raise Refused()
+                keys[key_id] = key
+            self.keys = keys
+            self.valid_until = time.monotonic() + 60
+            return True
+        except Exception:
+            # A detached refresh always returns a value: no upstream diagnostic
+            # or unobserved task exception escapes when all awaiters cancel.
+            return False
 
     async def verify(self, token: str) -> Principal:
         try:

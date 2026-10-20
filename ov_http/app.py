@@ -222,7 +222,10 @@ def create_app(config: Config, *, jwks_ssl_context: ssl.SSLContext | None = None
     @asynccontextmanager
     async def lifespan(app):
         async with backend_client, jwks_client, sdk_lifespan(app):
-            yield
+            try:
+                yield
+            finally:
+                await verifier.close()
 
     sdk_app.router.lifespan_context = lifespan
     return SecurityGate(sdk_app, config, verifier)

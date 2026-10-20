@@ -69,7 +69,11 @@ keys or other signing algorithms are refused.
 Redirects, proxy environment settings and compressed upstream bodies are
 refused. JWKS refresh has a five-second deadline/cooldown; successful keys remain
 cached at most 60 seconds. Unknown keys trigger a bounded refresh. Required refresh
-failure refuses the token; no stale-key fallback exists. Issuance revocation is
+failure refuses the token; no stale-key fallback exists. One retained, shielded
+refresh task has its own five-second timeout, so cancelling an authentication
+awaiter does not cancel public JWKS refresh or poison its cooldown. Shutdown
+cancels and awaits that task before closing the JWKS client. Backend reads remain
+request-owned and cancellable. Issuance revocation is
 not instant offline JWT invalidation.
 
 Every request gets its own immutable principal with effective roots, expiry and

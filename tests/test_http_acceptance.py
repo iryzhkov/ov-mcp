@@ -496,18 +496,32 @@ async def test_one_client_changes_grants_each_request_and_expiry_stops_work(f):
 
 
 @pytest.mark.asyncio
-async def test_expired_jwks_cache_requires_successful_refresh(f):
+@pytest.mark.parametrize("refresh_status", [200, 503])
+async def test_expired_jwks_refresh_survives_cancelled_authentication(f, refresh_status):
     async with f.session() as session:
         response, _ = await call(session, "memory_read", uri=A + "/other.md")
         assert not response.is_error
     before = len(f.captured)
-    f.jwks_status = 503
-    # Exercise the actual cache TTL rather than altering verifier internals.
+    # Exercise real expiry, then cancel the authentication task while its HTTPS
+    # JWKS fetch is in flight. No clock, cache or process-global state patching.
     await asyncio.sleep(60.1)
+    f.jwks_status, f.jwks_delay = refresh_status, 0.5
+    triggering_auth = asyncio.create_task(f.app.verifier.verify(f.token()))
+    async with asyncio.timeout(3):
+        while f.jwks_calls < 2:
+            await asyncio.sleep(0.01)
+    triggering_auth.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await triggering_auth
     async with httpx.AsyncClient(headers={"Host": "ov.example"}, trust_env=False) as client:
-        r = await client.post(f.url, headers={"Authorization": "Bearer " + f.token()},
+        started = time.monotonic()
+        r = await client.post(f.url, headers={"Authorization": "Bearer " + f.token(),
+                                              "Accept": "application/json, text/event-stream"},
                               json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-        assert r.status_code == 401
+        assert r.status_code == (200 if refresh_status == 200 else 401)
+        assert time.monotonic() - started < 3
+        if refresh_status == 200:
+            assert "memory_read" in r.text
     assert f.jwks_calls == 2 and len(f.captured) == before
 
 
