@@ -68,6 +68,16 @@ async def test_full_grant_can_narrow_search_before_backend_retrieval(resources_f
 
 
 @pytest.mark.asyncio
+async def test_narrowed_search_rejects_in_grant_but_out_of_query_response(resources_f):
+    f = resources_f
+    f.semantic_bad = B + "/secret.md"
+    async with f.session(full_token(f)) as session:
+        response, value = await call(session, "memory_find", query="needle", scope=A)
+        assert response.is_error and value == {"error": "Resource unavailable."}
+    assert f.semantic_trace[-1]["targets"] == [A]
+
+
+@pytest.mark.asyncio
 async def test_narrow_file_token_still_reads_metadata_without_wider_traversal(resources_f):
     f = resources_f
     uri = A + "/other.md"

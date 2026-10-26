@@ -119,7 +119,9 @@ class Backend:
         for hit in hits:
             if not isinstance(hit, dict):
                 raise Refused()
-            self.principal.require(hit.get("uri"))
+            uri = self.principal.require(hit.get("uri"))
+            if not any(contains(root, uri) for root in roots):
+                raise Refused()
             score = hit.get("score")
             if (hit.get("context_type") != "resource" or type(hit.get("level")) is not int
                     or hit["level"] not in (0, 1, 2) or type(score) not in (int, float)

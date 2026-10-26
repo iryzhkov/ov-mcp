@@ -26,7 +26,7 @@ class Refused(Exception):
 
 def canonical(uri: str) -> str:
     if (not isinstance(uri, str) or len(uri) > 1024
-            or (uri != RESOURCE_ROOT and not URI.fullmatch(uri))
+            or not URI.fullmatch(uri)
             or any(p in (".", "..") for p in uri.split("/"))):
         raise Refused()
     return uri
