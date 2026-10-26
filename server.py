@@ -830,9 +830,16 @@ def _resolve_wikilink(name: str) -> str | None:
 # --------------------------------------------------------------------------
 
 def _upload(text: str, filename: str) -> Any:
-    """Stage text for ingestion; usable only when the answer carries temp_path."""
+    """Stage text for ingestion; usable only when _staged_path finds a path."""
     return _call("POST", "/resources/temp_upload",
                  files={"file": (filename, text.encode("utf-8"), "text/markdown")})
+
+
+def _staged_path(up: Any) -> str | None:
+    """The temp_path an upload answered with, or None if it is missing, empty
+    or not a string. Nothing is deleted on the strength of an unusable one."""
+    path = up.get("temp_path") if isinstance(up, dict) else None
+    return path if isinstance(path, str) and path.strip() else None
 
 
 def _ingest(text: str, dest_uri: str, filename: str, reason: str, up: Any = None) -> Any:
@@ -840,13 +847,14 @@ def _ingest(text: str, dest_uri: str, filename: str, reason: str, up: Any = None
     already uploaded it passes the upload's answer as up."""
     if up is None:
         up = _upload(text, filename)
-    if not isinstance(up, dict) or "temp_path" not in up:
+    temp_path = _staged_path(up)
+    if temp_path is None:
         return up if _failed(up) else {"_error": "UPLOAD_FAILED", "message": str(up)[:200]}
     # `to` is the destination node, not its parent: passing a directory that
     # already exists fails with "Target URI already exists". Callers name the
     # directory, so the leaf is composed by the caller.
     return _call("POST", "/resources", json_body={
-        "temp_path": up["temp_path"], "to": dest_uri, "reason": reason,
+        "temp_path": temp_path, "to": dest_uri, "reason": reason,
         # wait=False: return as soon as OpenViking has stored the note and enqueued
         # the embedding and semantic passes. Those call the OpenAI API over the network
         # and were what made this tool slow. The note is durable and readable on return;
@@ -998,6 +1006,23 @@ def _legacy_ingest_problem() -> str | None:
         schema = properties = None
     if not isinstance(schema, dict) or not isinstance(properties, dict):
         return "its API schema does not describe POST /api/v1/resources"
+    # The body is compatible only if the schema can be read as plainly as this
+    # check reads it: no combinators that could add constraints, every legacy
+    # field it declares described by a schema object, and a required list of
+    # names that the legacy body actually sends.
+    required = schema.get("required", [])
+    if (any(k in schema for k in ("allOf", "anyOf", "oneOf", "not", "if"))
+            or not isinstance(required, list)
+            or not all(isinstance(name, str) for name in required)
+            or any(not isinstance(properties[f], dict)
+                   for f in LEGACY_INGEST_FIELDS if f in properties)):
+        return "its API schema does not describe POST /api/v1/resources in a form this check reads"
+    unsent = [name for name in required if name not in LEGACY_INGEST_FIELDS]
+    if unsent:
+        problem = ("its POST /api/v1/resources requires " + ", ".join(unsent)
+                   + ", which the legacy request does not send")
+        _legacy_ingest_cache = (now, problem)
+        return problem
     missing = [f for f in LEGACY_INGEST_FIELDS if f not in properties]
     if "temp_path" in missing or (missing and schema.get("additionalProperties") is False):
         problem = ("its POST /api/v1/resources does not accept "
@@ -1074,7 +1099,7 @@ def memory_write(text: str, to: str, filename: str, reason: str = "",
             # Stage the new text before the delete, so an upload this file
             # cannot use leaves the old note in place.
             upload = _upload(text, filename)
-            if not isinstance(upload, dict) or "temp_path" not in upload:
+            if _staged_path(upload) is None:
                 failure = upload if _failed(upload) else {
                     "_error": "UPLOAD_FAILED", "message": str(upload)[:200]}
                 return (f"Overwrite aborted, nothing changed: {dest_uri} was not deleted "
@@ -1254,13 +1279,13 @@ def _reingest(uri: str) -> bool:
     # Upload before deleting, so an upload that answers in a shape this file
     # cannot use leaves the note where it was.
     up = _upload(text, filename)
-    if not isinstance(up, dict) or "temp_path" not in up:
+    if _staged_path(up) is None:
         return False
     purged = _purge(uri)
     if "error" in purged:
         return False
     written = _call("POST", "/resources", json_body={
-        "temp_path": up["temp_path"], "to": uri, "reason": "reindex", "wait": False,
+        "temp_path": _staged_path(up), "to": uri, "reason": "reindex", "wait": False,
         "timeout": TIMEOUT})
     return not _failed(written)
 

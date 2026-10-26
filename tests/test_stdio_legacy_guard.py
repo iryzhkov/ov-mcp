@@ -55,6 +55,7 @@ class FakeBackend:
         self.empty_dirs: set[str] = set()
         self.spec: dict | None = None  # overrides the shape's schema when set
         self.upload_key: str | None = None  # overrides the shape's upload answer
+        self.upload_value: object = "upload_1"
         self.calls: list[tuple[str, str]] = []
 
     @property
@@ -111,7 +112,7 @@ class FakeBackend:
             return self.ok({})
         if path == "/api/v1/resources/temp_upload":
             key = self.upload_key or ("temp_file_id" if self.shape == "v0.5.2" else "temp_path")
-            return self.ok({key: "upload_1"})
+            return self.ok({key: self.upload_value})
         if path == "/api/v1/resources":
             body = json.loads(request.content)
             if self.shape == "v0.5.2" and ("temp_path" in body or "timeout" in body):
@@ -225,6 +226,10 @@ def cyclic_spec() -> dict:
     return spec
 
 
+def model_of(spec: dict) -> dict:
+    return spec["components"]["schemas"]["AddResourceRequest"]
+
+
 def bad_spec(edit) -> dict:
     spec = schema("classic")
     edit(spec)
@@ -241,12 +246,75 @@ def bad_spec(edit) -> dict:
         "application/json"].update(schema={"$ref": "other.json#/AddResourceRequest"})),
     bad_spec(lambda s: s.update(components=[])),
     bad_spec(lambda s: s.update(paths={})),
+    bad_spec(lambda s: model_of(s).update(required="path")),
+    bad_spec(lambda s: model_of(s).update(required=["to", 1])),
+    bad_spec(lambda s: model_of(s).update(allOf=[{"required": ["path"]}])),
+    bad_spec(lambda s: model_of(s)["properties"].update(temp_path=False)),
 ])
 def test_malformed_or_cyclic_schema_fails_closed_and_is_not_cached(backend, spec):
     backend.spec = spec
     assert_refused_untouched(server.memory_reindex(NOTE), backend)
     assert "does not describe" in server.memory_reindex(NOTE)
     assert server._legacy_ingest_cache is None
+
+
+@pytest.mark.parametrize("backend", [("classic",)], indirect=True)
+def test_a_required_field_the_legacy_body_omits_is_refused(backend):
+    spec = schema("classic")
+    model_of(spec).update(required=["path"])
+    backend.spec = spec
+    for reply in (server.memory_reindex(NOTE),
+                  server.memory_mv(NOTE, "viking://resources/ns/moved.md"),
+                  server.memory_write("new", "viking://resources/ns", "note.md",
+                                      overwrite=True)):
+        assert reply.startswith("Refused, nothing changed"), reply
+        assert "requires path" in reply
+    assert backend.mutations == []
+    assert backend.files[CHUNK] == OLD_TEXT
+
+
+@pytest.mark.parametrize("backend", [("classic",)], indirect=True)
+def test_required_fields_the_legacy_body_sends_still_pass(backend):
+    spec = schema("classic")
+    model_of(spec).update(required=["temp_path", "to"], additionalProperties=False)
+    backend.spec = spec
+    assert server.memory_reindex(NOTE) == "Reindexed 1 document(s)."
+
+
+BAD_UPLOADS = [None, "", "   ", 7, ["upload_1"], {"path": "upload_1"}]
+
+
+@pytest.mark.parametrize("backend", [("classic",)], indirect=True)
+@pytest.mark.parametrize("value", BAD_UPLOADS)
+def test_unusable_temp_path_stops_overwrite_before_the_delete(backend, value):
+    backend.upload_value = value
+    reply = server.memory_write("new", "viking://resources/ns", "note.md", overwrite=True)
+    assert reply.startswith("Overwrite aborted, nothing changed"), reply
+    assert backend.mutations == [("POST", "/api/v1/resources/temp_upload")]
+    assert backend.files[CHUNK] == OLD_TEXT
+
+
+@pytest.mark.parametrize("backend", [("classic",)], indirect=True)
+@pytest.mark.parametrize("value", BAD_UPLOADS)
+def test_unusable_temp_path_stops_reindex_before_the_delete(backend, value):
+    backend.upload_value = value
+    assert server.memory_reindex(NOTE).startswith("Reindexed 0")
+    assert backend.mutations == [("POST", "/api/v1/resources/temp_upload")]
+    assert backend.files[CHUNK] == OLD_TEXT
+    # The move itself still happens; its re-ingest must not delete the moved note.
+    reply = server.memory_mv(NOTE, "viking://resources/ns/moved.md")
+    assert reply.count("Could not re-ingest") == 1, reply
+    assert ("POST", "/api/v1/resources") not in backend.mutations
+    assert backend.files["viking://resources/ns/moved.md/note.md"] == OLD_TEXT
+
+
+@pytest.mark.parametrize("backend", [("classic",)], indirect=True)
+@pytest.mark.parametrize("value", BAD_UPLOADS)
+def test_unusable_temp_path_never_reaches_ingest_on_a_new_write(backend, value):
+    backend.upload_value = value
+    reply = server.memory_write("new", "viking://resources/ns", "fresh.md")
+    assert "UPLOAD_FAILED" in reply
+    assert ("POST", "/api/v1/resources") not in backend.mutations
 
 
 @pytest.mark.parametrize("backend", [("classic",)], indirect=True)
