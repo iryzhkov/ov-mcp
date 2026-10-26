@@ -5,7 +5,8 @@ import re
 
 import httpx
 
-from .auth import Principal, Refused, canonical, contains, strict_json
+from .auth import (Principal, Refused, BROWSE_METADATA_NAMES, contains,
+                   storage_internal_name, strict_json)
 from .config import Config, SEMANTIC_PROFILE, RESOURCES_PROFILE
 
 SAFE_ERROR = "Resource unavailable."
@@ -131,6 +132,8 @@ class Backend:
         result = await self._get("/fs/stat", uri)
         if not isinstance(result, dict) or type(result.get("isDir")) is not bool:
             raise Refused()
+        if self.config.semantic_profile == RESOURCES_PROFILE and result.get("uri") != uri:
+            raise Refused()
         size = result.get("size", 0)
         if type(size) is not int or not 0 <= size <= 2**53:
             raise Refused()
@@ -144,12 +147,16 @@ class Backend:
         children = set()
         for child in result:
             try:
-                canonical(child)
+                self.principal.canonical(child)
                 if (not self.principal.allows(child) or not contains(uri, child) or child == uri
                         or "/" in child[len(uri) + 1:]):
+                    if self.config.semantic_profile == RESOURCES_PROFILE:
+                        raise Refused()
                     continue
                 children.add(child)
             except Refused:
+                if self.config.semantic_profile == RESOURCES_PROFILE:
+                    raise
                 continue
         return sorted(children, key=natural)
 
@@ -192,9 +199,10 @@ class Backend:
             if not contains(uri, child) or child == uri:
                 raise Refused()
             relative = child[len(uri) + 1:].split("/")
-            # No hidden summaries, lock files or internal directories. Refuse
-            # unexpected upstream output rather than silently changing offsets.
-            if (any(part.startswith(".") for part in relative)
+            # Native listings expose ordinary dot directories but hide dot
+            # files. Reserved metadata/control names are never browse entries.
+            if (any(storage_internal_name(part) or part in BROWSE_METADATA_NAMES for part in relative)
+                    or (relative[-1].startswith(".") and not entry["isDir"])
                     or len(relative) > (depth if recursive else 1) or child in paths):
                 raise Refused()
             paths.append(child)

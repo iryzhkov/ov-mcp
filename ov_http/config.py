@@ -43,6 +43,8 @@ RESOURCES_PROFILE = "resources-directories-v052-v1"
 # backend artifact still needs its own final source/artifact qualification.
 RESOURCES_REVISION = "7f3ae1af822d936c1d0b070537772b0f1d59122f"
 RESOURCE_ROOT = "viking://resources"
+LEGACY_URI_POLICY = "legacy-ascii-v1"
+RESOURCES_URI_POLICY = "resources-utf8-read-v1"
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,11 @@ class Config:
             expected = RESOURCES_REVISION if self.semantic_profile == RESOURCES_PROFILE else SEMANTIC_REVISION
             if self.semantic_backend_revision != expected or not roots:
                 raise ValueError("semantic profile requires exact backend revision and namespace admission")
+
+    @property
+    def uri_policy(self) -> str:
+        # Runtime profile selects authority rules; bearer claims cannot select them.
+        return RESOURCES_URI_POLICY if self.semantic_profile == RESOURCES_PROFILE else LEGACY_URI_POLICY
 
     def admits_namespace(self, root: str) -> bool:
         if self.semantic_profile == RESOURCES_PROFILE:

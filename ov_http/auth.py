@@ -11,11 +11,13 @@ import time
 import httpx
 import jwt
 
-from .config import Config
+from .config import Config, LEGACY_URI_POLICY, RESOURCES_URI_POLICY
 
 RESOURCE_ROOT = "viking://resources"
 ACTIONS = ("read", "write", "remove", "maintain")
 URI = re.compile(r"viking://resources/(?:[A-Za-z0-9_@+.,=-]+/)*[A-Za-z0-9_@+.,=-]+\Z")
+STORAGE_INTERNAL_NAMES = {".path.ovlock", ".redirect.json", ".sync_log.json"}
+BROWSE_METADATA_NAMES = {".abstract.md", ".overview.md", ".relations.json"}
 
 
 class Refused(Exception):
@@ -27,6 +29,39 @@ def canonical(uri: str) -> str:
             or (uri != RESOURCE_ROOT and not URI.fullmatch(uri))
             or any(p in (".", "..") for p in uri.split("/"))):
         raise Refused()
+    return uri
+
+
+def storage_internal_name(name: str) -> bool:
+    # Qualified against upstream storage/internal_names.py at the pinned revision.
+    return name in STORAGE_INTERNAL_NAMES or name.startswith(".exact.ovlock.")
+
+
+def resources_canonical(uri: str) -> str:
+    """Exact read identities only. Never normalize, decode, shorten or sanitize."""
+    if not isinstance(uri, str):
+        raise Refused()
+    try:
+        encoded = uri.encode("utf-8")
+    except UnicodeEncodeError:
+        raise Refused() from None
+    if (len(encoded) > 1024 or uri != uri.strip()
+            or (uri != RESOURCE_ROOT and not uri.startswith(RESOURCE_ROOT + "/"))):
+        raise Refused()
+    if uri == RESOURCE_ROOT:
+        return uri
+    for part in uri[len(RESOURCE_ROOT) + 1:].split("/"):
+        # Upstream shortens components over 255 UTF-8 bytes on reads. Refuse
+        # instead of authorizing one name and addressing another storage name.
+        if (not part or part in (".", "..") or len(part.encode("utf-8")) > 255
+                or part != part.strip() or storage_internal_name(part) or part == ".relations.json"):
+            raise Refused()
+        for character in part:
+            if character.isascii():
+                if character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_@+.,=- ":
+                    raise Refused()
+            elif not character.isprintable() or character.isspace():
+                raise Refused()
     return uri
 
 
@@ -75,6 +110,14 @@ class Principal:
     expires: int
     grant_digest: str
     actions: tuple[str, ...] = ("read",)
+    uri_policy: str = LEGACY_URI_POLICY
+
+    def canonical(self, uri: str) -> str:
+        if self.uri_policy == LEGACY_URI_POLICY:
+            return canonical(uri)
+        if self.uri_policy == RESOURCES_URI_POLICY:
+            return resources_canonical(uri)
+        raise Refused()
 
     def require_action(self, action: str, *uris: str) -> None:
         if (action not in ACTIONS or action not in self.actions
@@ -84,7 +127,7 @@ class Principal:
             self.require(uri)
 
     def allows(self, uri: str) -> bool:
-        canonical(uri)
+        self.canonical(uri)
         return time.time() < self.expires and any(contains(r, uri) for r in self.roots)
 
     def require(self, uri: str) -> str:
@@ -97,7 +140,7 @@ class Principal:
             return (self.require(requested),)
         if time.time() >= self.expires:
             raise Refused()
-        return self.roots
+        return tuple(self.require(root) for root in self.roots)
 
 
 async def bounded_json(client: httpx.AsyncClient, method: str, url: str,
@@ -238,7 +281,9 @@ class Verifier:
             grants = claims.get("ov_namespaces")
             if not isinstance(grants, list) or not 1 <= len(grants) <= 16:
                 raise Refused()
-            roots = tuple(sorted(canonical(r) for r in grants))
+            uri_policy = self.config.uri_policy
+            check_uri = resources_canonical if uri_policy == RESOURCES_URI_POLICY else canonical
+            roots = tuple(sorted(check_uri(r) for r in grants))
             if any(contains(a, b) for i, a in enumerate(roots) for b in roots[i + 1:]):
                 raise Refused()
             if self.config.namespace_roots and any(not self.config.admits_namespace(r) for r in roots):
@@ -256,9 +301,12 @@ class Verifier:
                 actions = tuple(declared)
             # Bind continuation/cache identity to effective authority, including
             # action reductions for the same subject and namespace grants.
+            authority = [roots, actions]
+            if uri_policy != LEGACY_URI_POLICY:
+                authority.append(uri_policy)
             digest = hashlib.sha256(json.dumps(
-                [roots, actions], separators=(",", ":")).encode()).hexdigest()
-            return Principal(subject, roots, expires, digest, actions)
+                authority, separators=(",", ":")).encode()).hexdigest()
+            return Principal(subject, roots, expires, digest, actions, uri_policy)
         except (ValueError, TypeError, KeyError, RecursionError, jwt.PyJWTError,
                 httpx.HTTPError, TimeoutError):
             raise Refused() from None

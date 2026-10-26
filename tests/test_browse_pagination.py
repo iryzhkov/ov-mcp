@@ -17,7 +17,8 @@ from starlette.routing import Route
 
 from ov_http.app import create_app, result, schema, SPECS
 from ov_http.auth import Principal, Refused
-from ov_http.config import Config, RESOURCES_PROFILE, RESOURCES_REVISION
+from ov_http.config import (Config, RESOURCES_PROFILE, RESOURCES_REVISION,
+                            LEGACY_URI_POLICY, RESOURCES_URI_POLICY)
 from ov_http.reader import Backend, Reader, BROWSE_OFFSET_LIMIT, BROWSE_PAGE_LIMIT
 from test_http_acceptance import A, B, f, call, serving
 
@@ -40,7 +41,7 @@ class Pages:
     def paths(self, root, recursive, depth):
         files = self.files
         if self.long_names:
-            files = {root + "/" + "n" * 970 + f"{i:03}.md" for i in range(110)}
+            files = {root + "/" + "n" * 240 + f"{i:03}.md" for i in range(110)}
         paths = set()
         for path in files:
             if path.startswith(root + "/"):
@@ -102,6 +103,7 @@ def config():
 
 
 def principal(roots=(ROOT,), **kwargs):
+    kwargs.setdefault("uri_policy", RESOURCES_URI_POLICY)
     return Principal("subject", roots, int(time.time()) + 240, "digest", **kwargs)
 
 
@@ -257,7 +259,9 @@ async def test_malformed_or_foreign_pages_refuse_entire_call(fault, recursive):
             entries[0]["uri"] = target
 
     pages.fault = corrupt
-    async with reader(pages, (ROOT,)) as read:
+    # Retain these exact legacy denials. Resources-policy acceptance is tested separately.
+    policy = LEGACY_URI_POLICY if fault in ("unicode", "space") else RESOURCES_URI_POLICY
+    async with reader(pages, (ROOT,), uri_policy=policy) as read:
         with pytest.raises(Refused):
             await read.paged_listing(A, recursive, 3, depth=1)
     assert len(pages.calls) == 2
@@ -267,8 +271,9 @@ async def test_malformed_or_foreign_pages_refuse_entire_call(fault, recursive):
 async def test_output_request_and_offset_ceiling_limits():
     pages = Pages()
     pages.long_names = True
+    long_root = ROOT + ("/" + "d" * 240) * 3
     async with reader(pages) as read:
-        value = await read.paged_listing(ROOT, False, 100)
+        value = await read.paged_listing(long_root, False, 100)
         assert len(value["entries"]) == 40 and not result(value).is_error
         assert read.backend.requests == 2 and read.backend.bytes <= 1048576
         assert max(pages.sizes) <= 262144
