@@ -13,6 +13,8 @@ import jwt
 
 from .config import Config
 
+RESOURCE_ROOT = "viking://resources"
+ACTIONS = ("read", "write", "remove", "maintain")
 URI = re.compile(r"viking://resources/(?:[A-Za-z0-9_@+.,=-]+/)*[A-Za-z0-9_@+.,=-]+\Z")
 
 
@@ -21,7 +23,8 @@ class Refused(Exception):
 
 
 def canonical(uri: str) -> str:
-    if (not isinstance(uri, str) or len(uri) > 1024 or not URI.fullmatch(uri)
+    if (not isinstance(uri, str) or len(uri) > 1024
+            or (uri != RESOURCE_ROOT and not URI.fullmatch(uri))
             or any(p in (".", "..") for p in uri.split("/"))):
         raise Refused()
     return uri
@@ -71,6 +74,14 @@ class Principal:
     roots: tuple[str, ...]
     expires: int
     grant_digest: str
+    actions: tuple[str, ...] = ("read",)
+
+    def require_action(self, action: str, *uris: str) -> None:
+        if (action not in ACTIONS or action not in self.actions
+                or time.time() >= self.expires):
+            raise Refused()
+        for uri in uris:
+            self.require(uri)
 
     def allows(self, uri: str) -> bool:
         canonical(uri)
@@ -232,8 +243,22 @@ class Verifier:
                 raise Refused()
             if self.config.namespace_roots and any(r not in self.config.namespace_roots for r in roots):
                 raise Refused()
-            digest = hashlib.sha256(json.dumps(roots, separators=(",", ":")).encode()).hexdigest()
-            return Principal(subject, roots, expires, digest)
+            actions = ("read",)
+            if "ov_actions" in claims:
+                declared = claims["ov_actions"]
+                if (not isinstance(declared, list) or not declared
+                        or any(not isinstance(a, str) or a not in ACTIONS for a in declared)
+                        or declared != [a for a in ACTIONS if a in declared]
+                        or "read" not in declared
+                        or any("ov." + a not in scope.split() for a in declared)
+                        or any(s not in {"ov." + a for a in ACTIONS} for s in scope.split())):
+                    raise Refused()
+                actions = tuple(declared)
+            # Bind continuation/cache identity to effective authority, including
+            # action reductions for the same subject and namespace grants.
+            digest = hashlib.sha256(json.dumps(
+                [roots, actions], separators=(",", ":")).encode()).hexdigest()
+            return Principal(subject, roots, expires, digest, actions)
         except (ValueError, TypeError, KeyError, RecursionError, jwt.PyJWTError,
                 httpx.HTTPError, TimeoutError):
             raise Refused() from None
