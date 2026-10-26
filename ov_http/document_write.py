@@ -56,7 +56,7 @@ MAX_EQUIVALENCE_LINES = 16384
 
 
 def parsed_equivalence(original, observed, sources, target):
-    """Recognize exact legacy line comparisons without erasing word boundaries."""
+    """Classify bounded parsed comparisons without erasing words or proving aliases."""
     if (
         original.count("\n") > MAX_EQUIVALENCE_LINES
         or observed.count("\n") > MAX_EQUIVALENCE_LINES
@@ -89,6 +89,20 @@ def parsed_equivalence(original, observed, sources, target):
         )
     if Counter(written) == Counter(read_back):
         return "title_directory_and_line_order" if heading else "line_order"
+    if (
+        not heading
+        and written
+        and written[0].startswith("# ")
+        and written[0] not in read_back
+        and Counter(written[1:]) == Counter(read_back)
+        and any(
+            source.startswith(target + "/") and "/" in source[len(target) + 1 :]
+            for source in sources
+        )
+    ):
+        # Nested Reader sources do not prove an alias retains this title.
+        # Exactly one missing first H1 is inconclusive, never equivalence.
+        return "unavailable_transformation"
     return None
 
 
@@ -278,7 +292,15 @@ class DocumentWriter:
                     reshape = parsed_equivalence(
                         raw.decode("utf-8"), text, sources, self.target
                     )
-                    if reshape is not None:
+                    if reshape == "unavailable_transformation":
+                        result.update(
+                            status="unavailable_transformation",
+                            complete=False,
+                            explanation="Content committed; every remaining body line and duplicate count matches, "
+                            "but title retention is not proven under the parser transformation. "
+                            "Verification is inconclusive, not verified equivalence.",
+                        )
+                    elif reshape is not None:
                         result.update(
                             status="equivalent_reshaped",
                             reshape=reshape,

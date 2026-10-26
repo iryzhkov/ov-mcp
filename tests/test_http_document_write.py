@@ -886,10 +886,9 @@ async def test_sdk_default_parsed_known_reshape_is_equivalent_not_error(
         ("alpha beta", {"0000.md": "alphabeta"}),
         ("Alpha\n    code\nBeta", {"0000.md": "Alpha\ncode\nBeta"}),
         ("# Title\n\nAlpha", {"0000.md": "Alpha"}),
-        ("# A B\n\nAlpha", {"A_B/0000.md": "Alpha"}),
     ],
 )
-async def test_sdk_parsed_loss_alteration_duplicates_and_unknown_title_are_errors(
+async def test_sdk_parsed_loss_alteration_duplicates_and_unevidenced_title_are_errors(
     sdk_documents, text, parts
 ):
     session, engine = sdk_documents
@@ -938,3 +937,90 @@ def test_parsed_equivalence_comparison_bound_is_finite():
         parsed_equivalence(
             "line\n" * (MAX_EQUIVALENCE_LINES + 1), "line", [], A + "/new.md"
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text,parts",
+    [
+        (
+            "# Homelab backup plan\n\n## Storage\nDisk\n## Restore\nSteps",
+            {
+                "Homelab_backup_plan/first.md": "## Storage\nDisk",
+                "Homelab_backup_plan/second.md": "## Restore\nSteps",
+            },
+        ),
+        ("# Backup: plan (v2)!\n\nAlpha", {"Backup_plan_v2/0000.md": "Alpha"}),
+        ("# A B\n\nAlpha", {"A_B/0000.md": "Alpha"}),
+        ("# Title\n\nAlpha", {"alien/0000.md": "Alpha"}),
+        (
+            "# A B\n\nAlpha\nBeta\nAlpha",
+            {"alien/a.md": "Beta", "alien/b.md": "Alpha\nAlpha"},
+        ),
+    ],
+)
+async def test_sdk_missing_leading_h1_with_nested_sources_is_inconclusive_not_equivalent(
+    sdk_documents, text, parts
+):
+    session, engine = sdk_documents
+    engine.rendered_parts = parts
+    async with session(**FULL_WRITE) as client:
+        response, answer = await call(client, "memory_write", **args(text=text))
+    assert not response.is_error, answer
+    assert answer["outcome"] == answer["content_state"] == "committed"
+    verification = answer["verification"]
+    assert verification["status"] == "unavailable_transformation"
+    assert verification["complete"] is False and "reshape" not in verification
+    assert "title retention is not proven" in verification["explanation"]
+    assert "inconclusive" in verification["explanation"]
+    assert answer["retry_safe"] is False and len(engine.effects) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text,parts",
+    [
+        ("# A B\n\nAlpha\nBeta", {"A_B/part.md": "Alpha"}),
+        ("# A B\n\nAlpha\nAlpha", {"alien/part.md": "Alpha"}),
+        ("# A B\n\nAlpha", {"A_B/part.md": "Altered"}),
+        ("# A B\n\nAlpha", {"A_B/part.md": "Alpha\nAlpha"}),
+        ("# A B\n\nkey = 'a b'", {"A_B/part.md": "key = 'ab'"}),
+        ("# A B\n\nAlpha", {"part.md": "Alpha"}),
+        ("# A B\n\n## Missing\nAlpha", {"A_B/part.md": "Alpha"}),
+    ],
+)
+async def test_sdk_unproven_title_never_masks_body_loss_or_missing_nested_evidence(
+    sdk_documents, text, parts
+):
+    session, engine = sdk_documents
+    engine.rendered_parts = parts
+    async with session(**FULL_WRITE) as client:
+        response, answer = await call(client, "memory_write", **args(text=text))
+    assert response.is_error, answer
+    assert answer["outcome"] == "committed"
+    assert answer["verification"]["status"] == "different"
+    assert answer["retry_safe"] is False and len(engine.effects) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verbatim", [False, True])
+async def test_sdk_unproven_h1_category_never_applies_to_raw_or_verbatim(
+    sdk_documents, verbatim
+):
+    session, engine = sdk_documents
+    original_reply = engine.reply
+
+    def readback(method, path, params, body):
+        status, value = original_reply(method, path, params, body)
+        return (200, ok("Alpha")) if path == "/content/read" else (status, value)
+
+    engine.reply = readback
+    options = args(text="# A B\n\nAlpha")
+    if verbatim:
+        options["verbatim"] = True
+    else:
+        options.update(filename="old.md", overwrite=True)
+    async with session(**FULL_WRITE) as client:
+        response, answer = await call(client, "memory_write", **options)
+    assert response.is_error and answer["verification"]["status"] == "different"
+    assert answer["outcome"] == "committed" and len(engine.effects) == 1
