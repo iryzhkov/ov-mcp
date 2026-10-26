@@ -829,32 +829,17 @@ def _resolve_wikilink(name: str) -> str | None:
 # Writing
 # --------------------------------------------------------------------------
 
-def _upload(text: str, filename: str) -> Any:
-    """Stage text for ingestion; usable only when _staged_path finds a path."""
-    return _call("POST", "/resources/temp_upload",
-                 files={"file": (filename, text.encode("utf-8"), "text/markdown")})
-
-
-def _staged_path(up: Any) -> str | None:
-    """The temp_path an upload answered with, or None if it is missing, empty
-    or not a string. Nothing is deleted on the strength of an unusable one."""
-    path = up.get("temp_path") if isinstance(up, dict) else None
-    return path if isinstance(path, str) and path.strip() else None
-
-
-def _ingest(text: str, dest_uri: str, filename: str, reason: str, up: Any = None) -> Any:
-    """Upload text and have OpenViking ingest it at dest_uri. A caller that has
-    already uploaded it passes the upload's answer as up."""
-    if up is None:
-        up = _upload(text, filename)
-    temp_path = _staged_path(up)
-    if temp_path is None:
+def _ingest(text: str, dest_uri: str, filename: str, reason: str) -> Any:
+    """Upload text and have OpenViking ingest it at dest_uri."""
+    up = _call("POST", "/resources/temp_upload",
+               files={"file": (filename, text.encode("utf-8"), "text/markdown")})
+    if not isinstance(up, dict) or "temp_path" not in up:
         return up if _failed(up) else {"_error": "UPLOAD_FAILED", "message": str(up)[:200]}
     # `to` is the destination node, not its parent: passing a directory that
     # already exists fails with "Target URI already exists". Callers name the
     # directory, so the leaf is composed by the caller.
     return _call("POST", "/resources", json_body={
-        "temp_path": temp_path, "to": dest_uri, "reason": reason,
+        "temp_path": up["temp_path"], "to": dest_uri, "reason": reason,
         # wait=False: return as soon as OpenViking has stored the note and enqueued
         # the embedding and semantic passes. Those call the OpenAI API over the network
         # and were what made this tool slow. The note is durable and readable on return;
@@ -928,181 +913,15 @@ def _write_verbatim(text: str, container_uri: str, filename: str,
             _rm(part_uri, recursive=True)
     return len(parts), None
 
-def _snapshot(uri: str) -> str | None:
-    """Best-effort copy of a node's text, so an overwrite that fails mid-way can
-    still hand the old content back rather than losing it."""
-    text, _ = _reassemble(uri)
-    return text or None
-
-
-# The body this file sends to POST /resources. Overwrite and reindex delete the
-# old note before sending it, so a backend that rejects it -- OpenViking 0.5.2
-# takes temp_file_id and forbids temp_path and timeout -- turns either one into
-# a deletion with nothing written back. The check below reads the backend's
-# published request schema, which changes nothing, and only a backend that
-# accepts this body is let through.
-#
-# This guards that known incompatibility only. A schema that accepts the body
-# says nothing about the shape of the upload's answer, and a compatible backend
-# can still fail after the delete; those paths keep their older handling (the
-# overwrite reply carries the old text when it could be read). It does not make
-# delete-then-reingest atomic.
-#
-# Only a refusal is remembered, for a few minutes: a backend can be swapped
-# under a running process, so a pass is re-checked by every destructive call,
-# and an unreadable or malformed schema is never remembered.
-#
-# The schema is read through a small closed list of forms: a pure $ref, an
-# object with properties, required and a boolean additionalProperties, and
-# legacy fields that are either unconstrained or typed by `type` or an anyOf
-# of bare types. Annotations are ignored. Any other keyword, wherever it
-# appears, refuses rather than being skipped, so a richer schema that a
-# compatible backend could publish is refused too. That false refusal is the
-# intended cost; this is not a JSON Schema validator.
-LEGACY_INGEST_FIELDS = ("temp_path", "to", "reason", "wait", "timeout")
-LEGACY_INGEST_TTL = 300.0
-SCHEMA_REF_PREFIX = "#/components/schemas/"
-SCHEMA_REF_DEPTH = 8
-SCHEMA_ANNOTATIONS = frozenset({"title", "description", "default", "examples", "deprecated"})
-SCHEMA_OBJECT_KEYWORDS = SCHEMA_ANNOTATIONS | {"type", "properties", "required",
-                                               "additionalProperties"}
-SCHEMA_FIELD_KEYWORDS = SCHEMA_ANNOTATIONS | {"type", "anyOf"}
-_legacy_ingest_cache: tuple[float, str] | None = None
-
-
-def _legacy_body_types() -> dict[str, set[str]]:
-    """The JSON types of the values the legacy body sends, field by field."""
-    timeout = {"number", "integer"} if float(TIMEOUT).is_integer() else {"number"}
-    return {"temp_path": {"string"}, "to": {"string"}, "reason": {"string"},
-            "wait": {"boolean"}, "timeout": timeout}
-
-
-def _type_names(value: Any) -> set[str]:
-    names = [value] if isinstance(value, str) else value
-    if not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names):
-        raise ValueError("type")
-    return set(names)
-
-
-def _field_types(field: Any) -> set[str] | None:
-    """The types a legacy field's schema allows, or None if it allows any value.
-    ValueError for any form outside the closed list above."""
-    if not isinstance(field, dict) or set(field) - SCHEMA_FIELD_KEYWORDS:
-        raise ValueError("field")
-    types = _type_names(field["type"]) if "type" in field else None
-    if "anyOf" in field:
-        branches = field["anyOf"]
-        if (not isinstance(branches, list) or not branches
-                or any(not isinstance(b, dict) or set(b) != {"type"} for b in branches)):
-            raise ValueError("anyOf")
-        union = set().union(*(_type_names(b["type"]) for b in branches))
-        types = union if types is None else types & union
-    return types
-
-
-def _resolve_schema(spec: dict, schema: Any) -> dict | None:
-    """Follow local $refs to a schema object; None for a cycle, a long chain,
-    a reference outside components/schemas, a $ref with any sibling keyword
-    (it could add constraints), or anything not shaped like a schema."""
-    seen: set[str] = set()
-    for _ in range(SCHEMA_REF_DEPTH):
-        if not isinstance(schema, dict):
-            return None
-        ref = schema.get("$ref")
-        if ref is None:
-            return schema
-        if len(schema) != 1:
-            return None
-        if not isinstance(ref, str) or not ref.startswith(SCHEMA_REF_PREFIX) or ref in seen:
-            return None
-        seen.add(ref)
-        components = spec.get("components")
-        schemas = components.get("schemas") if isinstance(components, dict) else None
-        if not isinstance(schemas, dict):
-            return None
-        schema = schemas.get(ref[len(SCHEMA_REF_PREFIX):])
-    return None
-
-
-def _legacy_ingest_problem() -> str | None:
-    """Why this backend cannot take the legacy ingest body, or None if it can.
-
-    Fails closed: if the schema cannot be read or does not describe the
-    endpoint, the answer is a problem, not a pass.
-    """
-    global _legacy_ingest_cache
-    now = time.monotonic()
-    if _legacy_ingest_cache and now - _legacy_ingest_cache[0] < LEGACY_INGEST_TTL:
-        return _legacy_ingest_cache[1]
-    _legacy_ingest_cache = None
-    try:
-        with httpx.Client(timeout=min(TIMEOUT, 15.0)) as client:
-            r = client.get(f"{BASE_URL}/openapi.json", headers=_headers())
-        spec = r.json() if r.status_code == 200 else None
-    except (httpx.HTTPError, ValueError, RuntimeError) as exc:
-        return f"its API schema could not be read ({type(exc).__name__})"
-    if not isinstance(spec, dict):
-        return f"its API schema could not be read (HTTP {r.status_code})"
-    try:
-        body = spec["paths"]["/api/v1/resources"]["post"]["requestBody"]
-        schema = _resolve_schema(spec, body["content"]["application/json"]["schema"])
-        properties = schema.get("properties") if schema is not None else None
-    except (KeyError, TypeError, AttributeError):
-        schema = properties = None
-    if not isinstance(schema, dict) or not isinstance(properties, dict):
-        return "its API schema does not describe POST /api/v1/resources"
-    # The body is compatible only if the schema can be read as plainly as this
-    # check reads it (see the closed list above), its required names are all
-    # sent by the legacy body, and each legacy field it types takes the type
-    # of the value actually sent.
-    unreadable = "its API schema does not describe POST /api/v1/resources in a form this check reads"
-    required = schema.get("required", [])
-    additional = schema.get("additionalProperties", True)
-    if (set(schema) - SCHEMA_OBJECT_KEYWORDS
-            or schema.get("type", "object") != "object"
-            or not isinstance(additional, bool)
-            or not isinstance(required, list)
-            or not all(isinstance(name, str) for name in required)):
-        return unreadable
-    try:
-        field_types = {f: _field_types(properties[f])
-                       for f in LEGACY_INGEST_FIELDS if f in properties}
-    except ValueError:
-        return unreadable
-    unsent = [name for name in required if name not in LEGACY_INGEST_FIELDS]
-    if unsent:
-        problem = ("its POST /api/v1/resources requires " + ", ".join(unsent)
-                   + ", which the legacy request does not send")
-        _legacy_ingest_cache = (now, problem)
-        return problem
-    missing = [f for f in LEGACY_INGEST_FIELDS if f not in properties]
-    if "temp_path" in missing or (missing and schema.get("additionalProperties") is False):
-        problem = ("its POST /api/v1/resources does not accept "
-                   + ", ".join(missing) + " (it takes "
-                   + ("temp_file_id" if "temp_file_id" in properties else "a different body")
-                   + ")")
-        _legacy_ingest_cache = (now, problem)
-        return problem
-    sent = _legacy_body_types()
-    mistyped = [f for f, allowed in field_types.items()
-                if allowed is not None and not allowed & sent[f]]
-    if mistyped:
-        problem = ("its POST /api/v1/resources types " + ", ".join(mistyped)
-                   + " differently from the values the legacy request sends")
-        _legacy_ingest_cache = (now, problem)
-        return problem
-    return None
-
-
-def _legacy_ingest_refusal(action: str) -> str | None:
-    """A refusal for an operation that deletes before re-ingesting, or None."""
-    problem = _legacy_ingest_problem()
-    if problem is None:
-        return None
-    return (f"Refused, nothing changed: {action} deletes the note and then re-ingests it, and "
-            f"this OpenViking backend cannot take that ingest request: {problem}. Running it "
-            "would delete the note with nothing written back. This operation is unsupported "
-            "on this backend until ov-mcp has a native adapter for it.")
+# Overwrite, reindex and a move with reindex=True each deleted a note and then
+# re-ingested it. The OpenViking 0.5.2 backend in use rejects the ingest request
+# this file sends, so each of them deleted the note and wrote nothing back. They
+# are refused before any backend call until a qualified native path replaces
+# them; their code is removed rather than left reachable.
+def _legacy_ingest_disabled(action: str) -> str:
+    return (f"Refused: {action} is temporarily disabled; nothing changed. It deletes the note "
+            "and then re-ingests it, and the current OpenViking backend rejects that ingest "
+            "request, so the note would be lost. A native replacement is not yet available.")
 
 
 @server.tool(description=(
@@ -1115,10 +934,16 @@ def _legacy_ingest_refusal(action: str) -> str | None:
     "content its real extension instead (config.yaml, notes.txt) and it is stored as flat numbered "
     "parts that rejoin byte-exactly. archived=True files the note under an archive/ sub-namespace, "
     "which keeps superseded material out of search results by default. Returns once the note is "
-    "stored and indexing is queued, so it may not surface in memory_search for a few seconds."))
+    "stored and indexing is queued, so it may not surface in memory_search for a few seconds. "
+    "overwrite=True is temporarily disabled and refuses without changing anything: replacing a "
+    "note deleted it and could not write it back on the current backend, and a native "
+    "replacement is not yet available."))
 def memory_write(text: str, to: str, filename: str, reason: str = "",
                  overwrite: bool = False, archived: bool = False,
                  verbatim: bool = False, verify: bool = True) -> str:
+    if overwrite:
+        return (_legacy_ingest_disabled("legacy overwrite")
+                + " Write under a different filename instead.")
     if not to.startswith(RESOURCES_ROOT):
         return (f"Refused: 'to' must be under {RESOURCES_ROOT}/. The agent scope is written "
                 "only by OpenViking's session extraction, and /resources rejects other scopes.")
@@ -1134,15 +959,7 @@ def memory_write(text: str, to: str, filename: str, reason: str = "",
     # `to` is the destination directory; the leaf is composed below. Resolve it
     # first so an existing target can be reported (or replaced) before uploading.
     dest_uri = to + "/" + (filename + VERBATIM_SUFFIX if verbatim else filename)
-    backup = None
-    upload = None
     notes: list[str] = []
-    if overwrite and _exists(dest_uri):
-        # Checked before anything below touches the destination, so a refusal
-        # leaves it exactly as it was, an empty directory included.
-        refusal = _legacy_ingest_refusal("overwrite")
-        if refusal:
-            return refusal
     if _exists(dest_uri) and not _walk(dest_uri)[0]:
         # An empty directory is not a note: it is residue from an interrupted
         # write or from the placeholder that index pruning has to create. Clear
@@ -1150,40 +967,17 @@ def memory_write(text: str, to: str, filename: str, reason: str = "",
         _rm(dest_uri, recursive=True)
         notes.append(f"Cleared an empty directory that was standing at {dest_uri}.")
     if _exists(dest_uri):
-        if not overwrite:
-            return (f"Refused: {dest_uri} already exists. OpenViking has no overwrite flag, so "
-                    "replacing a note means deleting it first. Re-run with overwrite=True to do "
-                    "that, or write under a different filename. Read the existing note before "
-                    "replacing it -- the delete is permanent.")
-        if not verbatim:
-            # Stage the new text before the delete, so an upload this file
-            # cannot use leaves the old note in place.
-            upload = _upload(text, filename)
-            if _staged_path(upload) is None:
-                failure = upload if _failed(upload) else {
-                    "_error": "UPLOAD_FAILED", "message": str(upload)[:200]}
-                return (f"Overwrite aborted, nothing changed: {dest_uri} was not deleted "
-                        f"because the new text could not be staged. {_error_text(failure)}")
-        backup = _snapshot(dest_uri)
-        removed = _purge(dest_uri)
-        if "error" in removed:
-            return f"Overwrite aborted, nothing changed: could not delete {dest_uri}. {removed['error']}"
+        return (f"Refused: {dest_uri} already exists. Replacing a note is temporarily "
+                "disabled, so write under a different filename.")
 
     if verbatim:
         stored, error = _write_verbatim(text, dest_uri, filename, reason)
         if error:
-            if backup is not None:
-                return (f"{error}\n\nThe previous note was already deleted. Its content is "
-                        "reproduced below so it can be restored:\n\n" + backup)
             return error
         lines = [f"Stored {dest_uri} as {stored} verbatim part(s)."]
     else:
-        written = _ingest(text, dest_uri, filename, reason, up=upload)
+        written = _ingest(text, dest_uri, filename, reason)
         if _failed(written):
-            if backup is not None:
-                return (f"Write failed after the old note was deleted: {_error_text(written)}\n\n"
-                        "The previous content is reproduced below so it can be restored:\n\n"
-                        + backup)
             return _error_text(written)
         lines = [f"Stored {dest_uri}."]
 
@@ -1273,19 +1067,18 @@ def memory_mkdir(uri: str) -> str:
     "Move or rename a node under viking://resources/, and repair the search index afterwards. "
     "OpenViking's own mv leaves the index records of each document's generated abstract and "
     "overview pointing at the old URI, where they outrank live notes and resolve to nothing; "
-    "those orphans are pruned here. reindex=True (default) then re-ingests the moved documents so "
-    "their abstracts are indexed at the new location -- set it False to move without re-ingesting, "
-    "which is faster but leaves the moved notes findable only by their content."))
+    "those orphans are pruned here. reindex=True (the default) re-ingested the moved documents and "
+    "is temporarily disabled: it refuses without changing anything, because re-ingesting deletes "
+    "each note and the current backend cannot write it back, and a native replacement is not yet "
+    "available. Pass reindex=False to move; the moved notes stay findable by their content."))
 def memory_mv(from_uri: str, to_uri: str, reindex: bool = True) -> str:
+    if reindex:
+        return (_legacy_ingest_disabled("memory_mv with reindex=True")
+                + " Run memory_mv with reindex=False to move without re-ingesting.")
     if not (from_uri.startswith(RESOURCES_ROOT) and to_uri.startswith(RESOURCES_ROOT)):
         return f"Refused: both paths must be under {RESOURCES_ROOT}/."
     if not _exists(from_uri):
         return f"Nothing to move: {from_uri} does not exist."
-    if reindex:
-        refusal = _legacy_ingest_refusal("memory_mv with reindex=True")
-        if refusal:
-            return (refusal + " To move without re-ingesting, run memory_mv with "
-                    "reindex=False.")
     _, old_dirs = _walk(from_uri)
     old_subtree = [from_uri] + old_dirs
 
@@ -1296,91 +1089,18 @@ def memory_mv(from_uri: str, to_uri: str, reindex: bool = True) -> str:
     pruned = _prune_hidden(old_subtree, from_uri)
 
     lines = [f"Moved {from_uri} -> {to_uri}.",
-             f"Index repaired: {pruned} stale record(s) pruned."]
-    if reindex:
-        documents = _documents_under(to_uri)
-        if len(documents) > 20:
-            lines.append(f"Skipped re-ingestion: {len(documents)} documents moved. Their content "
-                         "is indexed at the new URIs; run memory_reindex on any whose abstract "
-                         "should be searchable again.")
-        else:
-            done, failed = 0, []
-            for doc in documents:
-                if _reingest(doc):
-                    done += 1
-                else:
-                    failed.append(doc)
-            lines.append(f"Re-ingested {done} document(s) so their abstracts index at the new URI.")
-            if failed:
-                lines.append("Could not re-ingest: " + ", ".join(failed))
-    else:
-        lines.append("Not re-ingested: the moved notes are findable by content, but their "
-                     "abstracts are no longer in the semantic index.")
+             f"Index repaired: {pruned} stale record(s) pruned.",
+             "Not re-ingested: the moved notes are findable by content, but their "
+             "abstracts are no longer in the semantic index."]
     return "\n".join(lines)
 
 
-def _documents_under(uri: str) -> list[str]:
-    """Ingested documents at or under a URI. A document is a directory whose name
-    carries a file extension; anything above that is a namespace."""
-    if _leaf(uri).endswith(DOC_EXTS):
-        return [uri]
-    _, dirs = _walk(uri)
-    documents = [d for d in dirs if _leaf(d).endswith(DOC_EXTS)]
-    return [d for d in documents
-            if not any(d != other and d.startswith(other + "/") for other in documents)]
-
-
-def _reingest(uri: str) -> bool:
-    """Rewrite a document in place so its index records match its current URI."""
-    text, _ = _reassemble(uri)
-    if not text:
-        return False
-    parent, _, filename = uri.rstrip("/").rpartition("/")
-    # Upload before deleting, so an upload that answers in a shape this file
-    # cannot use leaves the note where it was.
-    up = _upload(text, filename)
-    if _staged_path(up) is None:
-        return False
-    purged = _purge(uri)
-    if "error" in purged:
-        return False
-    written = _call("POST", "/resources", json_body={
-        "temp_path": _staged_path(up), "to": uri, "reason": "reindex", "wait": False,
-        "timeout": TIMEOUT})
-    return not _failed(written)
-
-
 @server.tool(description=(
-    "Re-ingest a note (or every note under a namespace) so that its chunks, abstract and index "
-    "records are rebuilt from its current content at its current URI. Use it after a move that "
-    "was made without reindexing, or when search returns a note under a URI that no longer "
-    "matches where it lives. Content is read back and rewritten, so nothing is lost, but the "
-    "abstract is regenerated."))
+    "Temporarily disabled: refuses without changing anything. It re-ingested a note by deleting "
+    "it and writing it back, and the current backend cannot write it back, so the note was lost. "
+    "A native replacement is not yet available."))
 def memory_reindex(uri: str, force: bool = False) -> str:
-    if not uri.startswith(RESOURCES_ROOT):
-        return f"Refused: only paths under {RESOURCES_ROOT}/ may be reindexed."
-    if not _exists(uri):
-        return f"Nothing to reindex: {uri} does not exist."
-    documents = _documents_under(uri)
-    if not documents:
-        return f"No ingested documents under {uri}."
-    if len(documents) > 20 and not force:
-        return (f"{len(documents)} documents under {uri}. Each is re-read, deleted and rewritten, "
-                "and its abstract is regenerated. Re-run with force=True to do all of them, or "
-                "name a single note.")
-    refusal = _legacy_ingest_refusal("memory_reindex")
-    if refusal:
-        return refusal
-    done, failed = 0, []
-    for doc in documents:
-        if _reingest(doc):
-            done += 1
-        else:
-            failed.append(doc)
-    text = f"Reindexed {done} document(s)."
-    if failed:
-        text += "\nFailed: " + ", ".join(failed)
-    return text
+    return _legacy_ingest_disabled("memory_reindex")
 
 
 # --------------------------------------------------------------------------

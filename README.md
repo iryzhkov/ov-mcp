@@ -51,14 +51,17 @@ reported on stderr and then ignored.
 Writes are confined to the `viking://resources/` scope. The agent scope is written only by
 OpenViking's own session extraction, and the `/resources` endpoint rejects anything else.
 
-OpenViking has no overwrite flag, so `memory_write(..., overwrite=True)` implements replacement as
-delete-then-write. It snapshots the existing content first and hands it back in the error if either
-the upload or the write fails, so a half-completed replacement does not lose the old note.
+`memory_write(..., overwrite=True)` is temporarily disabled. OpenViking has no overwrite flag, so
+replacement was delete-then-write, and the current OpenViking backend (0.5.2) rejects the ingest
+request this adapter sends: replacing a note deleted it and wrote nothing back. Overwrite now
+refuses before any backend call, as do `memory_reindex` and `memory_mv` with its default
+`reindex=True`, which deleted and re-ingested notes the same way. A native replacement is not yet
+available.
 
 Note that a note written through `/resources` is *ingested*: OpenViking stores it as a directory of
 chunks rather than as a plain file. Passing a `to` that already holds a document therefore nests a
 new document directory inside it rather than replacing it — pass the parent directory and let the
-leaf be composed, and use `overwrite=True` when replacing.
+leaf be composed, and write under a new filename while replacement is disabled.
 
 `memory_write` verifies by default: it reads the note back the way `memory_read` does and compares
 it with what was sent, so a parser that reshapes the content is reported rather than discovered
@@ -97,8 +100,9 @@ the workaround becomes a no-op rather than a hazard.
 **`POST /fs/mv` half-updates the vector index.** It rewrites the index records of the files it can
 list, but `.abstract.md` and `.overview.md` are filtered out of that listing, so their records keep
 pointing at the old URI. They then outrank live notes for their subject and resolve to nothing.
-`memory_mv` prunes those orphans after the move, and by default re-ingests the moved documents so
-their abstracts are indexed at the new location; `reindex=False` skips that.
+`memory_mv` prunes those orphans after the move. Re-ingesting the moved documents so their abstracts
+index at the new location (`reindex=True`, the default) is temporarily disabled, so a move needs
+`reindex=False`.
 
 **`DELETE /fs` cannot clean up after it.** OpenViking removes the node first and cleans the index
 second, so on a node that is already gone it raises before the cleanup runs and the orphaned record
