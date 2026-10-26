@@ -52,6 +52,7 @@ class Documents(TypedBackend):
         self.changed_after_ack = False
         self.backups = []
         self.control = "c"
+        self.rendered_parts = None
 
     def descriptor(self, uri):
         if uri in self.files:
@@ -177,6 +178,24 @@ class Documents(TypedBackend):
                     if body["representation"] == "verbatim"
                     else "parsed_directory"
                 )
+            if self.rendered_parts is not None:
+                self.files = {
+                    k: v
+                    for k, v in self.files.items()
+                    if not (k == target or k.startswith(target + "/"))
+                }
+                if representation == "raw_file":
+                    self.files[target] = next(
+                        iter(self.rendered_parts.values())
+                    ).encode()
+                else:
+                    for relative, text in self.rendered_parts.items():
+                        member = target + "/" + relative
+                        self.files[member] = text.encode()
+                        parent = member.rsplit("/", 1)[0]
+                        while parent != target:
+                            self.dirs.add(parent)
+                            parent = parent.rsplit("/", 1)[0]
             self.effects.append((path, target))
             result = {
                 "uri": target,
@@ -254,10 +273,12 @@ async def test_create_composition_literal_reason_and_actual_reader(
         answer, failed = await run(
             **args(verbatim=verbatim, reason="Preserve [[literal]] hint")
         )
-    assert not failed if verbatim else failed  # ordinary Reader trims chunk boundaries
+    assert not failed
     target = A + "/new.md" + (".verbatim" if verbatim else "")
     assert answer["outcome"] == "committed" and answer["uri"] == target
-    assert answer["verification"]["status"] == ("exact" if verbatim else "different")
+    assert answer["verification"]["status"] == (
+        "exact" if verbatim else "equivalent_reshaped"
+    )
     assert assembled == [target]
     post = [c[3] for c in engine.calls if c[1] == WRITE_PATH][0]
     assert post["source_name"] == "new.md" and post["text"] == args()["text"]
@@ -806,3 +827,114 @@ async def test_replacement_backup_ack_must_match_declared_uri_old_kind_and_body(
             **args(filename="old.md", overwrite=True, verify=False)
         )
     assert failed and answer["outcome"] == "unknown" and len(engine.effects) == 1
+
+
+FULL_WRITE = {
+    "ov_actions": list(ACTIONS),
+    "scope": "ov.read ov.write ov.remove ov.maintain",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text,parts,reshape",
+    [
+        ("  Alpha\n\nBeta  \n", None, "boundary_line_whitespace"),
+        ("Alpha  \n\nBeta\t\n", None, "boundary_line_whitespace"),
+        (
+            "Alpha\n\nBeta\n\nAlpha",
+            {"0000.md": "Beta", "0001.md": "Alpha\n\nAlpha"},
+            "line_order",
+        ),
+        (
+            "# Title\n\nAlpha\nBeta\n",
+            {"Title/0000.md": "Alpha\nBeta"},
+            "title_directory_and_boundary_whitespace",
+        ),
+        (
+            "# Title\n\nAlpha\nBeta\nAlpha",
+            {"Title/a.md": "Beta", "Title/b.md": "Alpha\nAlpha"},
+            "title_directory_and_line_order",
+        ),
+    ],
+)
+async def test_sdk_default_parsed_known_reshape_is_equivalent_not_error(
+    sdk_documents, text, parts, reshape
+):
+    session, engine = sdk_documents
+    engine.rendered_parts = parts
+    async with session(**FULL_WRITE) as client:
+        response, answer = await call(client, "memory_write", **args(text=text))
+    assert not response.is_error, answer
+    assert answer["content_state"] == "committed" and answer["verification"]["complete"]
+    assert answer["verification"]["status"] == "equivalent_reshaped"
+    assert answer["verification"]["reshape"] == reshape
+    assert "duplicate count" in answer["verification"]["explanation"]
+    assert answer["verification"]["observation"] == "post_commit_not_linearizable"
+    assert len(engine.effects) == 1 and answer["retry_safe"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "text,parts",
+    [
+        ("Alpha\nBeta", {"0000.md": "Alpha"}),
+        ("Alpha\nBeta", {"0000.md": "Alpha\nGamma"}),
+        ("Alpha\nAlpha\nBeta", {"0000.md": "Alpha\nBeta"}),
+        ("Alpha\nBeta", {"0000.md": "Alpha\nBeta\nBeta"}),
+        ("key = 'a b'", {"0000.md": "key = 'ab'"}),
+        ("alpha beta", {"0000.md": "alphabeta"}),
+        ("Alpha\n    code\nBeta", {"0000.md": "Alpha\ncode\nBeta"}),
+        ("# Title\n\nAlpha", {"0000.md": "Alpha"}),
+        ("# A B\n\nAlpha", {"A_B/0000.md": "Alpha"}),
+    ],
+)
+async def test_sdk_parsed_loss_alteration_duplicates_and_unknown_title_are_errors(
+    sdk_documents, text, parts
+):
+    session, engine = sdk_documents
+    engine.rendered_parts = parts
+    async with session(**FULL_WRITE) as client:
+        response, answer = await call(client, "memory_write", **args(text=text))
+    assert response.is_error, answer
+    assert (
+        answer["content_state"] == "committed"
+        and answer["verification"]["status"] == "different"
+    )
+    assert len(engine.effects) == 1 and answer["retry_safe"] is False
+    assert "Do not retry" in answer["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("representation", ["raw_file", "verbatim"])
+async def test_sdk_raw_and_verbatim_known_reshape_still_requires_exact_bytes(
+    sdk_documents, representation
+):
+    session, engine = sdk_documents
+    original_reply = engine.reply
+
+    def readback(method, path, params, body):
+        status, value = original_reply(method, path, params, body)
+        if path == "/content/read":
+            return 200, ok("Alpha\nBeta")
+        return status, value
+
+    engine.reply = readback
+    options = args(text="  Alpha\n\nBeta\n")
+    if representation == "raw_file":
+        options.update(filename="old.md", overwrite=True)
+    else:
+        options["verbatim"] = True
+    async with session(**FULL_WRITE) as client:
+        response, answer = await call(client, "memory_write", **options)
+    assert response.is_error and answer["outcome"] == "committed"
+    assert answer["verification"]["status"] == "different" and len(engine.effects) == 1
+
+
+def test_parsed_equivalence_comparison_bound_is_finite():
+    from ov_http.document_write import MAX_EQUIVALENCE_LINES, parsed_equivalence
+
+    with pytest.raises(BudgetExhausted):
+        parsed_equivalence(
+            "line\n" * (MAX_EQUIVALENCE_LINES + 1), "line", [], A + "/new.md"
+        )

@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import re
 import secrets
+from collections import Counter
 
 import httpx
 
@@ -48,6 +49,47 @@ def node(value, *, absent=True):
         ):
             return dict(value)
     raise Refused()
+
+
+# Input is already capped at 1 MiB; bound comparison allocations independently.
+MAX_EQUIVALENCE_LINES = 16384
+
+
+def parsed_equivalence(original, observed, sources, target):
+    """Recognize exact legacy line comparisons without erasing word boundaries."""
+    if (
+        original.count("\n") > MAX_EQUIVALENCE_LINES
+        or observed.count("\n") > MAX_EQUIVALENCE_LINES
+    ):
+        raise BudgetExhausted()
+
+    # Reader strips outer chunk boundaries. As in the original verifier, ignore
+    # blank lines and trailing line whitespace, never internal spaces/indentation.
+    def lines(text):
+        return [line.rstrip() for line in text.strip().split("\n") if line.strip()]
+
+    written, read_back = lines(original), lines(observed)
+    heading = False
+    if written and written[0].startswith("# ") and written[0] not in read_back:
+        title = written[0][2:]
+        # A missing title is only represented structurally when an ACTUAL
+        # Reader source includes that exact directory component beneath target.
+        heading = any(
+            source.startswith(target + "/")
+            and title in source[len(target) + 1 :].split("/")[:-1]
+            for source in sources
+        )
+        if heading:
+            written = written[1:]
+    if written == read_back:
+        return (
+            "title_directory_and_boundary_whitespace"
+            if heading
+            else "boundary_line_whitespace"
+        )
+    if Counter(written) == Counter(read_back):
+        return "title_directory_and_line_order" if heading else "line_order"
+    return None
 
 
 class DocumentWriter:
@@ -229,8 +271,24 @@ class DocumentWriter:
                     parts=len(sources),
                     complete=True,
                 )
+                if (
+                    result["status"] == "different"
+                    and answer["representation"] == "parsed_directory"
+                ):
+                    reshape = parsed_equivalence(
+                        raw.decode("utf-8"), text, sources, self.target
+                    )
+                    if reshape is not None:
+                        result.update(
+                            status="equivalent_reshaped",
+                            reshape=reshape,
+                            explanation="Parsed Reader observation retains every nonblank line and duplicate count "
+                            "after the stated boundary-whitespace, evidenced title-directory, "
+                            "or line-order reshape; internal spaces and indentation are preserved.",
+                        )
         except BudgetExhausted:
             result["status"] = "unavailable_budget"
+            result["complete"] = False
         except asyncio.CancelledError:
             result["status"] = "unavailable_cancelled"
         except (
