@@ -920,6 +920,66 @@ def _snapshot(uri: str) -> str | None:
     return text or None
 
 
+# The body this file sends to POST /resources. Overwrite and reindex delete the
+# old note before sending it, so a backend that rejects it -- OpenViking 0.5.2
+# takes temp_file_id and forbids temp_path and timeout -- turns either one into
+# a deletion with nothing written back. The check below reads the backend's
+# published request schema, which changes nothing, and only a backend that
+# accepts this body is let through. Its answer is kept for a few minutes so a
+# reindex of many notes asks once; an unreachable schema is never cached.
+LEGACY_INGEST_FIELDS = ("temp_path", "to", "reason", "wait", "timeout")
+LEGACY_INGEST_TTL = 300.0
+_legacy_ingest_cache: tuple[float, str | None] | None = None
+
+
+def _legacy_ingest_problem() -> str | None:
+    """Why this backend cannot take the legacy ingest body, or None if it can.
+
+    Fails closed: if the schema cannot be read or does not describe the
+    endpoint, the answer is a problem, not a pass.
+    """
+    global _legacy_ingest_cache
+    now = time.monotonic()
+    if _legacy_ingest_cache and now - _legacy_ingest_cache[0] < LEGACY_INGEST_TTL:
+        return _legacy_ingest_cache[1]
+    try:
+        with httpx.Client(timeout=min(TIMEOUT, 15.0)) as client:
+            r = client.get(f"{BASE_URL}/openapi.json", headers=_headers())
+        spec = r.json() if r.status_code == 200 else None
+    except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+        return f"its API schema could not be read ({type(exc).__name__})"
+    if not isinstance(spec, dict):
+        return f"its API schema could not be read (HTTP {r.status_code})"
+    try:
+        body = spec["paths"]["/api/v1/resources"]["post"]["requestBody"]
+        schema = body["content"]["application/json"]["schema"]
+        while "$ref" in schema:
+            schema = spec["components"]["schemas"][schema["$ref"].rsplit("/", 1)[-1]]
+        properties = schema.get("properties") or {}
+    except (KeyError, TypeError, AttributeError):
+        return "its API schema does not describe POST /api/v1/resources"
+    missing = [f for f in LEGACY_INGEST_FIELDS if f not in properties]
+    problem = None
+    if "temp_path" in missing or (missing and schema.get("additionalProperties") is False):
+        problem = ("its POST /api/v1/resources does not accept "
+                   + ", ".join(missing) + " (it takes "
+                   + ("temp_file_id" if "temp_file_id" in properties else "a different body")
+                   + ")")
+    _legacy_ingest_cache = (now, problem)
+    return problem
+
+
+def _legacy_ingest_refusal(action: str) -> str | None:
+    """A refusal for an operation that deletes before re-ingesting, or None."""
+    problem = _legacy_ingest_problem()
+    if problem is None:
+        return None
+    return (f"Refused, nothing changed: {action} deletes the note and then re-ingests it, and "
+            f"this OpenViking backend cannot take that ingest request: {problem}. Running it "
+            "would delete the note with nothing written back. This operation is unsupported "
+            "on this backend until ov-mcp has a native adapter for it.")
+
+
 @server.tool(description=(
     "Store a durable note. Only for things the user asked to be remembered. 'to' must be under "
     "viking://resources/; pick or create a namespace like viking://resources/projects. The note "
@@ -963,6 +1023,9 @@ def memory_write(text: str, to: str, filename: str, reason: str = "",
                     "replacing a note means deleting it first. Re-run with overwrite=True to do "
                     "that, or write under a different filename. Read the existing note before "
                     "replacing it -- the delete is permanent.")
+        refusal = _legacy_ingest_refusal("overwrite")
+        if refusal:
+            return "\n".join(notes + [refusal])
         backup = _snapshot(dest_uri)
         removed = _purge(dest_uri)
         if "error" in removed:
@@ -1080,6 +1143,11 @@ def memory_mv(from_uri: str, to_uri: str, reindex: bool = True) -> str:
         return f"Refused: both paths must be under {RESOURCES_ROOT}/."
     if not _exists(from_uri):
         return f"Nothing to move: {from_uri} does not exist."
+    if reindex:
+        refusal = _legacy_ingest_refusal("memory_mv with reindex=True")
+        if refusal:
+            return (refusal + " To move without re-ingesting, run memory_mv with "
+                    "reindex=False.")
     _, old_dirs = _walk(from_uri)
     old_subtree = [from_uri] + old_dirs
 
@@ -1130,12 +1198,14 @@ def _reingest(uri: str) -> bool:
     if not text:
         return False
     parent, _, filename = uri.rstrip("/").rpartition("/")
-    purged = _purge(uri)
-    if "error" in purged:
-        return False
+    # Upload before deleting, so an upload that answers in a shape this file
+    # cannot use leaves the note where it was.
     up = _call("POST", "/resources/temp_upload",
                files={"file": (filename, text.encode("utf-8"), "text/markdown")})
     if not isinstance(up, dict) or "temp_path" not in up:
+        return False
+    purged = _purge(uri)
+    if "error" in purged:
         return False
     written = _call("POST", "/resources", json_body={
         "temp_path": up["temp_path"], "to": uri, "reason": "reindex", "wait": False,
@@ -1161,6 +1231,9 @@ def memory_reindex(uri: str, force: bool = False) -> str:
         return (f"{len(documents)} documents under {uri}. Each is re-read, deleted and rewritten, "
                 "and its abstract is regenerated. Re-run with force=True to do all of them, or "
                 "name a single note.")
+    refusal = _legacy_ingest_refusal("memory_reindex")
+    if refusal:
+        return refusal
     done, failed = 0, []
     for doc in documents:
         if _reingest(doc):
