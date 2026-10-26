@@ -52,6 +52,9 @@ class FakeBackend:
         self.shape = shape
         self.openapi_status = openapi_status
         self.files = {CHUNK: OLD_TEXT, "viking://resources/ns/other.md/other.md": "x"}
+        self.empty_dirs: set[str] = set()
+        self.spec: dict | None = None  # overrides the shape's schema when set
+        self.upload_key: str | None = None  # overrides the shape's upload answer
         self.calls: list[tuple[str, str]] = []
 
     @property
@@ -59,7 +62,7 @@ class FakeBackend:
         return [c for c in self.calls if c not in self.READS]
 
     def _dirs(self) -> set[str]:
-        dirs = set()
+        dirs = set(self.empty_dirs)
         for uri in self.files:
             parts = uri.split("/")
             for i in range(4, len(parts)):
@@ -78,7 +81,7 @@ class FakeBackend:
         if path == "/openapi.json":
             if self.openapi_status != 200:
                 return httpx.Response(self.openapi_status, text="not here")
-            return httpx.Response(200, json=schema(self.shape))
+            return httpx.Response(200, json=self.spec or schema(self.shape))
         if path == "/api/v1/fs/stat":
             if uri in self.files:
                 return self.ok({"isDir": False, "size": len(self.files[uri])})
@@ -95,6 +98,8 @@ class FakeBackend:
         if path == "/api/v1/content/read":
             return self.ok(self.files.get(uri, ""))
         if path == "/api/v1/fs" and request.method == "DELETE":
+            self.empty_dirs = {d for d in self.empty_dirs
+                               if d != uri and not d.startswith(uri + "/")}
             for key in [k for k in self.files if k == uri or k.startswith(uri + "/")]:
                 del self.files[key]
             return self.ok({})
@@ -105,7 +110,7 @@ class FakeBackend:
                 self.files[dst + key[len(src):]] = self.files.pop(key)
             return self.ok({})
         if path == "/api/v1/resources/temp_upload":
-            key = "temp_file_id" if self.shape == "v0.5.2" else "temp_path"
+            key = self.upload_key or ("temp_file_id" if self.shape == "v0.5.2" else "temp_path")
             return self.ok({key: "upload_1"})
         if path == "/api/v1/resources":
             body = json.loads(request.content)
@@ -194,7 +199,98 @@ def test_unreadable_schema_fails_closed_and_is_not_cached(backend):
     assert server._legacy_ingest_cache is None
 
 
-def test_schema_answer_is_cached_for_a_bounded_time(backend, monkeypatch):
+def test_overwrite_of_an_empty_directory_is_refused_without_clearing_it(backend):
+    empty = "viking://resources/ns/empty.md"
+    backend.empty_dirs = {empty}
+    reply = server.memory_write("new", "viking://resources/ns", "empty.md", overwrite=True)
+    assert reply.startswith("Refused, nothing changed"), reply
+    assert backend.mutations == []
+    assert backend.empty_dirs == {empty}
+
+
+def test_plain_write_over_an_empty_directory_keeps_its_old_behaviour(backend):
+    backend.empty_dirs = {"viking://resources/ns/empty.md"}
+    reply = server.memory_write("new", "viking://resources/ns", "empty.md")
+    assert "UPLOAD_FAILED" in reply
+    assert ("DELETE", "/api/v1/fs") in backend.mutations
+    assert ("GET", "/openapi.json") not in backend.calls
+
+
+def cyclic_spec() -> dict:
+    spec = schema("classic")
+    spec["components"]["schemas"] = {
+        "A": {"$ref": "#/components/schemas/B"}, "B": {"$ref": "#/components/schemas/A"}}
+    spec["paths"]["/api/v1/resources"]["post"]["requestBody"]["content"][
+        "application/json"]["schema"] = {"$ref": "#/components/schemas/A"}
+    return spec
+
+
+def bad_spec(edit) -> dict:
+    spec = schema("classic")
+    edit(spec)
+    return spec
+
+
+@pytest.mark.parametrize("spec", [
+    cyclic_spec(),
+    bad_spec(lambda s: s["components"]["schemas"].update(
+        AddResourceRequest={"$ref": "#/components/schemas/AddResourceRequest"})),
+    bad_spec(lambda s: s["components"]["schemas"]["AddResourceRequest"].update(
+        properties=["temp_path", "to", "reason", "wait", "timeout"])),
+    bad_spec(lambda s: s["paths"]["/api/v1/resources"]["post"]["requestBody"]["content"][
+        "application/json"].update(schema={"$ref": "other.json#/AddResourceRequest"})),
+    bad_spec(lambda s: s.update(components=[])),
+    bad_spec(lambda s: s.update(paths={})),
+])
+def test_malformed_or_cyclic_schema_fails_closed_and_is_not_cached(backend, spec):
+    backend.spec = spec
+    assert_refused_untouched(server.memory_reindex(NOTE), backend)
+    assert "does not describe" in server.memory_reindex(NOTE)
+    assert server._legacy_ingest_cache is None
+
+
+@pytest.mark.parametrize("backend", [("classic",)], indirect=True)
+def test_a_pass_is_rechecked_by_every_destructive_call(backend):
+    server.memory_reindex(NOTE)
+    server.memory_reindex(NOTE)
+    assert backend.calls.count(("GET", "/openapi.json")) == 2
+    assert server._legacy_ingest_cache is None
+
+
+@pytest.mark.parametrize("backend", [("classic",)], indirect=True)
+def test_namespace_reindex_checks_once_for_the_whole_call(backend):
+    reply = server.memory_reindex("viking://resources/ns")
+    assert reply == "Reindexed 2 document(s).", reply
+    assert backend.calls.count(("GET", "/openapi.json")) == 1
+
+
+@pytest.mark.parametrize("backend", [("classic",)], indirect=True)
+def test_backend_swapped_to_incompatible_in_the_same_process_is_refused(backend):
+    assert server.memory_reindex(NOTE) == "Reindexed 1 document(s)."
+    backend.shape = "v0.5.2"
+    backend.files[CHUNK] = OLD_TEXT
+    before = list(backend.mutations)
+    for reply in (server.memory_reindex(NOTE),
+                  server.memory_mv(NOTE, "viking://resources/ns/moved.md"),
+                  server.memory_write("new", "viking://resources/ns", "note.md",
+                                      overwrite=True)):
+        assert reply.startswith("Refused, nothing changed"), reply
+    assert backend.mutations == before
+    assert backend.files[CHUNK] == OLD_TEXT
+
+
+@pytest.mark.parametrize("backend", [("classic",)], indirect=True)
+def test_overwrite_stages_the_new_text_before_it_deletes(backend):
+    # A schema that accepts the legacy body does not prove the upload answers
+    # with temp_path; when it does not, the old note must stay.
+    backend.upload_key = "temp_file_id"
+    reply = server.memory_write("new", "viking://resources/ns", "note.md", overwrite=True)
+    assert reply.startswith("Overwrite aborted, nothing changed"), reply
+    assert backend.mutations == [("POST", "/api/v1/resources/temp_upload")]
+    assert backend.files[CHUNK] == OLD_TEXT
+
+
+def test_incompatibility_is_cached_for_a_bounded_time(backend, monkeypatch):
     clock = [1000.0]
     monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
     server.memory_reindex(NOTE)

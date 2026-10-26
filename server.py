@@ -829,10 +829,17 @@ def _resolve_wikilink(name: str) -> str | None:
 # Writing
 # --------------------------------------------------------------------------
 
-def _ingest(text: str, dest_uri: str, filename: str, reason: str) -> Any:
-    """Upload text and have OpenViking ingest it at dest_uri."""
-    up = _call("POST", "/resources/temp_upload",
-               files={"file": (filename, text.encode("utf-8"), "text/markdown")})
+def _upload(text: str, filename: str) -> Any:
+    """Stage text for ingestion; usable only when the answer carries temp_path."""
+    return _call("POST", "/resources/temp_upload",
+                 files={"file": (filename, text.encode("utf-8"), "text/markdown")})
+
+
+def _ingest(text: str, dest_uri: str, filename: str, reason: str, up: Any = None) -> Any:
+    """Upload text and have OpenViking ingest it at dest_uri. A caller that has
+    already uploaded it passes the upload's answer as up."""
+    if up is None:
+        up = _upload(text, filename)
     if not isinstance(up, dict) or "temp_path" not in up:
         return up if _failed(up) else {"_error": "UPLOAD_FAILED", "message": str(up)[:200]}
     # `to` is the destination node, not its parent: passing a directory that
@@ -925,11 +932,43 @@ def _snapshot(uri: str) -> str | None:
 # takes temp_file_id and forbids temp_path and timeout -- turns either one into
 # a deletion with nothing written back. The check below reads the backend's
 # published request schema, which changes nothing, and only a backend that
-# accepts this body is let through. Its answer is kept for a few minutes so a
-# reindex of many notes asks once; an unreachable schema is never cached.
+# accepts this body is let through.
+#
+# This guards that known incompatibility only. A schema that accepts the body
+# says nothing about the shape of the upload's answer, and a compatible backend
+# can still fail after the delete; those paths keep their older handling (the
+# overwrite reply carries the old text when it could be read). It does not make
+# delete-then-reingest atomic.
+#
+# Only a refusal is remembered, for a few minutes: a backend can be swapped
+# under a running process, so a pass is re-checked by every destructive call,
+# and an unreadable or malformed schema is never remembered.
 LEGACY_INGEST_FIELDS = ("temp_path", "to", "reason", "wait", "timeout")
 LEGACY_INGEST_TTL = 300.0
-_legacy_ingest_cache: tuple[float, str | None] | None = None
+SCHEMA_REF_PREFIX = "#/components/schemas/"
+SCHEMA_REF_DEPTH = 8
+_legacy_ingest_cache: tuple[float, str] | None = None
+
+
+def _resolve_schema(spec: dict, schema: Any) -> dict | None:
+    """Follow local $refs to a schema object; None for a cycle, a long chain,
+    a reference outside components/schemas, or anything not shaped like one."""
+    seen: set[str] = set()
+    for _ in range(SCHEMA_REF_DEPTH):
+        if not isinstance(schema, dict):
+            return None
+        ref = schema.get("$ref")
+        if ref is None:
+            return schema
+        if not isinstance(ref, str) or not ref.startswith(SCHEMA_REF_PREFIX) or ref in seen:
+            return None
+        seen.add(ref)
+        components = spec.get("components")
+        schemas = components.get("schemas") if isinstance(components, dict) else None
+        if not isinstance(schemas, dict):
+            return None
+        schema = schemas.get(ref[len(SCHEMA_REF_PREFIX):])
+    return None
 
 
 def _legacy_ingest_problem() -> str | None:
@@ -942,6 +981,7 @@ def _legacy_ingest_problem() -> str | None:
     now = time.monotonic()
     if _legacy_ingest_cache and now - _legacy_ingest_cache[0] < LEGACY_INGEST_TTL:
         return _legacy_ingest_cache[1]
+    _legacy_ingest_cache = None
     try:
         with httpx.Client(timeout=min(TIMEOUT, 15.0)) as client:
             r = client.get(f"{BASE_URL}/openapi.json", headers=_headers())
@@ -952,21 +992,21 @@ def _legacy_ingest_problem() -> str | None:
         return f"its API schema could not be read (HTTP {r.status_code})"
     try:
         body = spec["paths"]["/api/v1/resources"]["post"]["requestBody"]
-        schema = body["content"]["application/json"]["schema"]
-        while "$ref" in schema:
-            schema = spec["components"]["schemas"][schema["$ref"].rsplit("/", 1)[-1]]
-        properties = schema.get("properties") or {}
+        schema = _resolve_schema(spec, body["content"]["application/json"]["schema"])
+        properties = schema.get("properties") if schema is not None else None
     except (KeyError, TypeError, AttributeError):
+        schema = properties = None
+    if not isinstance(schema, dict) or not isinstance(properties, dict):
         return "its API schema does not describe POST /api/v1/resources"
     missing = [f for f in LEGACY_INGEST_FIELDS if f not in properties]
-    problem = None
     if "temp_path" in missing or (missing and schema.get("additionalProperties") is False):
         problem = ("its POST /api/v1/resources does not accept "
                    + ", ".join(missing) + " (it takes "
                    + ("temp_file_id" if "temp_file_id" in properties else "a different body")
                    + ")")
-    _legacy_ingest_cache = (now, problem)
-    return problem
+        _legacy_ingest_cache = (now, problem)
+        return problem
+    return None
 
 
 def _legacy_ingest_refusal(action: str) -> str | None:
@@ -1010,7 +1050,14 @@ def memory_write(text: str, to: str, filename: str, reason: str = "",
     # first so an existing target can be reported (or replaced) before uploading.
     dest_uri = to + "/" + (filename + VERBATIM_SUFFIX if verbatim else filename)
     backup = None
+    upload = None
     notes: list[str] = []
+    if overwrite and _exists(dest_uri):
+        # Checked before anything below touches the destination, so a refusal
+        # leaves it exactly as it was, an empty directory included.
+        refusal = _legacy_ingest_refusal("overwrite")
+        if refusal:
+            return refusal
     if _exists(dest_uri) and not _walk(dest_uri)[0]:
         # An empty directory is not a note: it is residue from an interrupted
         # write or from the placeholder that index pruning has to create. Clear
@@ -1023,9 +1070,15 @@ def memory_write(text: str, to: str, filename: str, reason: str = "",
                     "replacing a note means deleting it first. Re-run with overwrite=True to do "
                     "that, or write under a different filename. Read the existing note before "
                     "replacing it -- the delete is permanent.")
-        refusal = _legacy_ingest_refusal("overwrite")
-        if refusal:
-            return "\n".join(notes + [refusal])
+        if not verbatim:
+            # Stage the new text before the delete, so an upload this file
+            # cannot use leaves the old note in place.
+            upload = _upload(text, filename)
+            if not isinstance(upload, dict) or "temp_path" not in upload:
+                failure = upload if _failed(upload) else {
+                    "_error": "UPLOAD_FAILED", "message": str(upload)[:200]}
+                return (f"Overwrite aborted, nothing changed: {dest_uri} was not deleted "
+                        f"because the new text could not be staged. {_error_text(failure)}")
         backup = _snapshot(dest_uri)
         removed = _purge(dest_uri)
         if "error" in removed:
@@ -1040,7 +1093,7 @@ def memory_write(text: str, to: str, filename: str, reason: str = "",
             return error
         lines = [f"Stored {dest_uri} as {stored} verbatim part(s)."]
     else:
-        written = _ingest(text, dest_uri, filename, reason)
+        written = _ingest(text, dest_uri, filename, reason, up=upload)
         if _failed(written):
             if backup is not None:
                 return (f"Write failed after the old note was deleted: {_error_text(written)}\n\n"
@@ -1200,8 +1253,7 @@ def _reingest(uri: str) -> bool:
     parent, _, filename = uri.rstrip("/").rpartition("/")
     # Upload before deleting, so an upload that answers in a shape this file
     # cannot use leaves the note where it was.
-    up = _call("POST", "/resources/temp_upload",
-               files={"file": (filename, text.encode("utf-8"), "text/markdown")})
+    up = _upload(text, filename)
     if not isinstance(up, dict) or "temp_path" not in up:
         return False
     purged = _purge(uri)
