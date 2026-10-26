@@ -913,11 +913,15 @@ def _write_verbatim(text: str, container_uri: str, filename: str,
             _rm(part_uri, recursive=True)
     return len(parts), None
 
-def _snapshot(uri: str) -> str | None:
-    """Best-effort copy of a node's text, so an overwrite that fails mid-way can
-    still hand the old content back rather than losing it."""
-    text, _ = _reassemble(uri)
-    return text or None
+# Overwrite, reindex and a move with reindex=True each deleted a note and then
+# re-ingested it. The OpenViking 0.5.2 backend in use rejects the ingest request
+# this file sends, so each of them deleted the note and wrote nothing back. They
+# are refused before any backend call until a qualified native path replaces
+# them; their code is removed rather than left reachable.
+def _legacy_ingest_disabled(action: str) -> str:
+    return (f"Refused: {action} is temporarily disabled; nothing changed. It deletes the note "
+            "and then re-ingests it, and the current OpenViking backend rejects that ingest "
+            "request, so the note would be lost. A native replacement is not yet available.")
 
 
 @server.tool(description=(
@@ -930,10 +934,16 @@ def _snapshot(uri: str) -> str | None:
     "content its real extension instead (config.yaml, notes.txt) and it is stored as flat numbered "
     "parts that rejoin byte-exactly. archived=True files the note under an archive/ sub-namespace, "
     "which keeps superseded material out of search results by default. Returns once the note is "
-    "stored and indexing is queued, so it may not surface in memory_search for a few seconds."))
+    "stored and indexing is queued, so it may not surface in memory_search for a few seconds. "
+    "overwrite=True is temporarily disabled and refuses without changing anything: replacing a "
+    "note deleted it and could not write it back on the current backend, and a native "
+    "replacement is not yet available."))
 def memory_write(text: str, to: str, filename: str, reason: str = "",
                  overwrite: bool = False, archived: bool = False,
                  verbatim: bool = False, verify: bool = True) -> str:
+    if overwrite:
+        return (_legacy_ingest_disabled("legacy overwrite")
+                + " Write under a different filename instead.")
     if not to.startswith(RESOURCES_ROOT):
         return (f"Refused: 'to' must be under {RESOURCES_ROOT}/. The agent scope is written "
                 "only by OpenViking's session extraction, and /resources rejects other scopes.")
@@ -949,7 +959,6 @@ def memory_write(text: str, to: str, filename: str, reason: str = "",
     # `to` is the destination directory; the leaf is composed below. Resolve it
     # first so an existing target can be reported (or replaced) before uploading.
     dest_uri = to + "/" + (filename + VERBATIM_SUFFIX if verbatim else filename)
-    backup = None
     notes: list[str] = []
     if _exists(dest_uri) and not _walk(dest_uri)[0]:
         # An empty directory is not a note: it is residue from an interrupted
@@ -958,31 +967,17 @@ def memory_write(text: str, to: str, filename: str, reason: str = "",
         _rm(dest_uri, recursive=True)
         notes.append(f"Cleared an empty directory that was standing at {dest_uri}.")
     if _exists(dest_uri):
-        if not overwrite:
-            return (f"Refused: {dest_uri} already exists. OpenViking has no overwrite flag, so "
-                    "replacing a note means deleting it first. Re-run with overwrite=True to do "
-                    "that, or write under a different filename. Read the existing note before "
-                    "replacing it -- the delete is permanent.")
-        backup = _snapshot(dest_uri)
-        removed = _purge(dest_uri)
-        if "error" in removed:
-            return f"Overwrite aborted, nothing changed: could not delete {dest_uri}. {removed['error']}"
+        return (f"Refused: {dest_uri} already exists. Replacing a note is temporarily "
+                "disabled, so write under a different filename.")
 
     if verbatim:
         stored, error = _write_verbatim(text, dest_uri, filename, reason)
         if error:
-            if backup is not None:
-                return (f"{error}\n\nThe previous note was already deleted. Its content is "
-                        "reproduced below so it can be restored:\n\n" + backup)
             return error
         lines = [f"Stored {dest_uri} as {stored} verbatim part(s)."]
     else:
         written = _ingest(text, dest_uri, filename, reason)
         if _failed(written):
-            if backup is not None:
-                return (f"Write failed after the old note was deleted: {_error_text(written)}\n\n"
-                        "The previous content is reproduced below so it can be restored:\n\n"
-                        + backup)
             return _error_text(written)
         lines = [f"Stored {dest_uri}."]
 
@@ -1072,10 +1067,14 @@ def memory_mkdir(uri: str) -> str:
     "Move or rename a node under viking://resources/, and repair the search index afterwards. "
     "OpenViking's own mv leaves the index records of each document's generated abstract and "
     "overview pointing at the old URI, where they outrank live notes and resolve to nothing; "
-    "those orphans are pruned here. reindex=True (default) then re-ingests the moved documents so "
-    "their abstracts are indexed at the new location -- set it False to move without re-ingesting, "
-    "which is faster but leaves the moved notes findable only by their content."))
+    "those orphans are pruned here. reindex=True (the default) re-ingested the moved documents and "
+    "is temporarily disabled: it refuses without changing anything, because re-ingesting deletes "
+    "each note and the current backend cannot write it back, and a native replacement is not yet "
+    "available. Pass reindex=False to move; the moved notes stay findable by their content."))
 def memory_mv(from_uri: str, to_uri: str, reindex: bool = True) -> str:
+    if reindex:
+        return (_legacy_ingest_disabled("memory_mv with reindex=True")
+                + " Run memory_mv with reindex=False to move without re-ingesting.")
     if not (from_uri.startswith(RESOURCES_ROOT) and to_uri.startswith(RESOURCES_ROOT)):
         return f"Refused: both paths must be under {RESOURCES_ROOT}/."
     if not _exists(from_uri):
@@ -1090,87 +1089,18 @@ def memory_mv(from_uri: str, to_uri: str, reindex: bool = True) -> str:
     pruned = _prune_hidden(old_subtree, from_uri)
 
     lines = [f"Moved {from_uri} -> {to_uri}.",
-             f"Index repaired: {pruned} stale record(s) pruned."]
-    if reindex:
-        documents = _documents_under(to_uri)
-        if len(documents) > 20:
-            lines.append(f"Skipped re-ingestion: {len(documents)} documents moved. Their content "
-                         "is indexed at the new URIs; run memory_reindex on any whose abstract "
-                         "should be searchable again.")
-        else:
-            done, failed = 0, []
-            for doc in documents:
-                if _reingest(doc):
-                    done += 1
-                else:
-                    failed.append(doc)
-            lines.append(f"Re-ingested {done} document(s) so their abstracts index at the new URI.")
-            if failed:
-                lines.append("Could not re-ingest: " + ", ".join(failed))
-    else:
-        lines.append("Not re-ingested: the moved notes are findable by content, but their "
-                     "abstracts are no longer in the semantic index.")
+             f"Index repaired: {pruned} stale record(s) pruned.",
+             "Not re-ingested: the moved notes are findable by content, but their "
+             "abstracts are no longer in the semantic index."]
     return "\n".join(lines)
 
 
-def _documents_under(uri: str) -> list[str]:
-    """Ingested documents at or under a URI. A document is a directory whose name
-    carries a file extension; anything above that is a namespace."""
-    if _leaf(uri).endswith(DOC_EXTS):
-        return [uri]
-    _, dirs = _walk(uri)
-    documents = [d for d in dirs if _leaf(d).endswith(DOC_EXTS)]
-    return [d for d in documents
-            if not any(d != other and d.startswith(other + "/") for other in documents)]
-
-
-def _reingest(uri: str) -> bool:
-    """Rewrite a document in place so its index records match its current URI."""
-    text, _ = _reassemble(uri)
-    if not text:
-        return False
-    parent, _, filename = uri.rstrip("/").rpartition("/")
-    purged = _purge(uri)
-    if "error" in purged:
-        return False
-    up = _call("POST", "/resources/temp_upload",
-               files={"file": (filename, text.encode("utf-8"), "text/markdown")})
-    if not isinstance(up, dict) or "temp_path" not in up:
-        return False
-    written = _call("POST", "/resources", json_body={
-        "temp_path": up["temp_path"], "to": uri, "reason": "reindex", "wait": False,
-        "timeout": TIMEOUT})
-    return not _failed(written)
-
-
 @server.tool(description=(
-    "Re-ingest a note (or every note under a namespace) so that its chunks, abstract and index "
-    "records are rebuilt from its current content at its current URI. Use it after a move that "
-    "was made without reindexing, or when search returns a note under a URI that no longer "
-    "matches where it lives. Content is read back and rewritten, so nothing is lost, but the "
-    "abstract is regenerated."))
+    "Temporarily disabled: refuses without changing anything. It re-ingested a note by deleting "
+    "it and writing it back, and the current backend cannot write it back, so the note was lost. "
+    "A native replacement is not yet available."))
 def memory_reindex(uri: str, force: bool = False) -> str:
-    if not uri.startswith(RESOURCES_ROOT):
-        return f"Refused: only paths under {RESOURCES_ROOT}/ may be reindexed."
-    if not _exists(uri):
-        return f"Nothing to reindex: {uri} does not exist."
-    documents = _documents_under(uri)
-    if not documents:
-        return f"No ingested documents under {uri}."
-    if len(documents) > 20 and not force:
-        return (f"{len(documents)} documents under {uri}. Each is re-read, deleted and rewritten, "
-                "and its abstract is regenerated. Re-run with force=True to do all of them, or "
-                "name a single note.")
-    done, failed = 0, []
-    for doc in documents:
-        if _reingest(doc):
-            done += 1
-        else:
-            failed.append(doc)
-    text = f"Reindexed {done} document(s)."
-    if failed:
-        text += "\nFailed: " + ", ".join(failed)
-    return text
+    return _legacy_ingest_disabled("memory_reindex")
 
 
 # --------------------------------------------------------------------------
@@ -1230,7 +1160,7 @@ def memory_index_prune(uri: str) -> str:
         return f"Refused: only paths under {RESOURCES_ROOT}/ may be pruned."
     if _exists(uri):
         return (f"{uri} exists, so its index record is not an orphan. Use memory_rm to delete the "
-                "note itself, or memory_reindex to rebuild its records.")
+                "note itself. Legacy memory_reindex is temporarily disabled.")
     if _prune_index(uri):
         return f"Pruned the index record for {uri}. Search should stop returning it immediately."
     return f"Could not prune {uri}: the placeholder needed to reach the index cleanup could not be created."
