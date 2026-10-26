@@ -127,10 +127,13 @@ class TypedBackend:
                      "updated": [uri] if exists else [], "unchanged": [], "queue_status": None,
                      "semantic_status": "deferred", "vector_status": "deferred", "source": "SECRET"}
         elif path == "/fs/mkdir":
-            assert set(body) == {"uri"}
+            assert set(body) <= {"uri", "description"} and "uri" in body
             uri = body["uri"]
+            assert uri.rsplit("/", 1)[0] in self.dirs
+            if uri in self.dirs or uri in self.files:
+                return 409, error("ALREADY_EXISTS")
             self.dirs.add(uri)
-            self.files[uri + "/.abstract.md"] = b"# directory"
+            self.files[uri + "/.abstract.md"] = body.get("description", "# directory").encode("utf-8")
             self.effects.append((path, uri))
             value = {"uri": uri, "secret": "SECRET"}
         elif path in {"/fs/resources-only/remove", "/fs/resources-only/prune-index"}:
@@ -275,9 +278,9 @@ async def test_mkdir_generated_path_and_resources_only_delete_dry_run_and_prune(
     engine = TypedBackend()
     async with direct(engine) as invoke:
         answer, failed = await invoke("memory_mkdir", uri=A + "/folder")
-        assert failed and answer["outcome"] == "not_started" and not engine.calls
-        engine.dirs.add(A + "/folder")
-        engine.files[A + "/folder/.abstract.md"] = b"# directory"
+        assert not failed and answer["outcome"] == "committed"
+        assert answer["indexing"] == "not_observed" and not answer["searchable_completion"]
+        assert engine.effects == [("/fs/mkdir", A + "/folder")]
         before = len(engine.effects)
         answer, failed = await invoke("memory_rm", uri=A + "/folder", recursive=True, dry_run=True)
         assert not failed and A + "/folder/.abstract.md" in answer["paths"]
@@ -570,6 +573,186 @@ async def test_audit_multi_prune_conflict_does_not_hide_prior_effects():
         answer, failed = await invoke("memory_index_audit", query="note", scope=A, fix=True)
     assert failed and answer["outcome"] == "unknown" and answer["retry_safe"] is False
     assert engine.effects == [("/fs/resources-only/prune-index", A + "/absent1.md")]
+
+
+
+@pytest.mark.asyncio
+async def test_sdk_mkdir_exact_uri_description_payload_and_sanitized_ack(sdk):
+    sessions, engine = sdk
+    uri = A + "/cafe\u0301猫"
+    description = "  # Résumé\r\n\nExact payload β  "
+    async with sessions(scope="ov.read ov.write", ov_actions=["read", "write"]) as session:
+        response, answer = await call(session, "memory_mkdir", uri=uri, description=description)
+        assert not response.is_error, answer
+        assert answer == {"uri": uri, "outcome": "committed", "resource_type": "directory",
+                          "indexing": "not_observed", "searchable_completion": False, "retry_safe": False}
+    assert engine.effects == [("/fs/mkdir", uri)]
+    posts = [row for row in engine.calls if row[0] == "POST"]
+    assert len(posts) == 1 and posts[0][3] == {"uri": uri, "description": description}
+    assert engine.calls[-2][1] == CONTRACT_PATH
+    assert engine.files[uri + "/.abstract.md"] == description.encode("utf-8")
+    assert "SECRET" not in json.dumps(answer)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claims", [{}, {"scope": "ov.read ov.write"},
+    {"scope": "ov.read ov.remove", "ov_actions": ["read", "remove"]}])
+async def test_sdk_mkdir_readonly_missing_write_action_refuses_before_io(sdk, claims):
+    sessions, engine = sdk
+    async with sessions(**claims) as session:
+        response, _ = await call(session, "memory_mkdir", uri=A + "/folder")
+        assert response.is_error
+    assert not engine.calls and not engine.effects
+
+
+@pytest.mark.asyncio
+async def test_sdk_mkdir_scope_action_mismatch_fails_authentication(sdk):
+    sessions, engine = sdk
+    with pytest.raises(Exception):
+        async with sessions(scope="ov.read", ov_actions=["read", "write"]):
+            pytest.fail("Mismatched signed scope authenticated")
+    assert not engine.calls and not engine.effects
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uri", [
+    ROOT, A, B + "/folder", A + "/space name", A + "/../escape", A + "/x%20y",
+    A + "/{namespace:key}", A + "/.path.ovlock", A + "/.exact.ovlock.a",
+    A + "/.relations.json", A + "/.abstract.md", A + "/.overview.md",
+    A + "/.sync_log.json", ROOT + "/.watch_tasks.json",
+])
+async def test_sdk_mkdir_path_root_and_parent_denial_before_io(sdk, uri):
+    sessions, engine = sdk
+    async with sessions(scope="ov.read ov.write", ov_actions=["read", "write"]) as session:
+        response, _ = await call(session, "memory_mkdir", uri=uri)
+        assert response.is_error
+    assert not engine.calls and not engine.effects
+
+
+@pytest.mark.asyncio
+async def test_mkdir_generated_abstract_bound_and_narrow_parent_denial():
+    engine = TypedBackend()
+    base = A + "/" + "/".join(["a" * 240] * 4)
+    uri = base + "/" + "b" * (1018 - len(base) - 1)
+    assert len(uri.encode()) == 1018
+    async with direct(engine) as invoke:
+        _, failed = await invoke("memory_mkdir", uri=uri)
+        assert failed
+    assert not engine.calls
+    async with direct(engine, roots=(A + "/folder/child",)) as invoke:
+        _, failed = await invoke("memory_mkdir", uri=A + "/folder/child")
+        assert failed
+    assert not engine.calls and not engine.effects
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args", [
+    {"acl": {"owner": "someone"}}, {"parents": True}, {"recursive": True},
+    {"description": "x" * 4097}, {"description": "β" * 2049},
+])
+async def test_sdk_mkdir_unsupported_parameters_and_description_budget_refuse(sdk, args):
+    sessions, engine = sdk
+    async with sessions(scope="ov.read ov.write", ov_actions=["read", "write"]) as session:
+        response, _ = await call(session, "memory_mkdir", uri=A + "/folder", **args)
+        assert response.is_error
+    assert not engine.calls and not engine.effects
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["file", "directory", "absent_parent", "file_parent"])
+async def test_sdk_mkdir_preflight_existing_target_or_bad_parent_has_no_post(sdk, kind):
+    sessions, engine = sdk
+    uri = A + "/folder"
+    if kind == "file":
+        engine.files[uri] = b"original file"
+    elif kind == "directory":
+        engine.dirs.add(uri)
+        engine.files[uri + "/.abstract.md"] = b"original abstract"
+    elif kind == "absent_parent":
+        uri = A + "/missing/child"
+    else:
+        uri = DOC + "/child"
+    baseline = (dict(engine.files), set(engine.dirs))
+    async with sessions(scope="ov.read ov.write", ov_actions=["read", "write"]) as session:
+        response, _ = await call(session, "memory_mkdir", uri=uri)
+        assert response.is_error
+    assert not engine.effects and not any(row[0] == "POST" for row in engine.calls)
+    assert (engine.files, engine.dirs) == baseline
+
+
+@pytest.mark.asyncio
+async def test_sdk_mkdir_concurrent_native_target_exists_does_not_clobber(sdk):
+    sessions, engine = sdk
+    uri = A + "/raced"
+    def competing_create():
+        engine.dirs.add(uri)
+        engine.files[uri + "/.abstract.md"] = b"competing original"
+    engine.on_contract = competing_create
+    async with sessions(scope="ov.read ov.write", ov_actions=["read", "write"]) as session:
+        response, answer = await call(session, "memory_mkdir", uri=uri)
+        assert response.is_error and answer["outcome"] == "not_started" and answer["conflict"]
+    assert not engine.effects and engine.files[uri + "/.abstract.md"] == b"competing original"
+    assert len([row for row in engine.calls if row[0] == "POST"]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("contract", [None, {"contract": "resources-document-mutations", "version": 0},
+                                      {"contract": "resources-document-mutations", "version": True}])
+async def test_sdk_mkdir_old_malformed_contract_never_dispatches(sdk, contract):
+    sessions, engine = sdk
+    engine.contract = contract
+    async with sessions(scope="ov.read ov.write", ov_actions=["read", "write"]) as session:
+        response, answer = await call(session, "memory_mkdir", uri=A + "/folder")
+        assert response.is_error and answer["outcome"] == "not_started"
+    assert not engine.effects and not any(row[0] == "POST" for row in engine.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["timeout", "malformed", "foreign", "failure_after"])
+async def test_sdk_mkdir_postdispatch_uncertainty_no_retry(sdk, fault):
+    sessions, engine = sdk
+    engine.fault = fault
+    async with sessions(scope="ov.read ov.write", ov_actions=["read", "write"]) as session:
+        response, answer = await call(session, "memory_mkdir", uri=A + "/folder")
+        assert response.is_error and answer["outcome"] == "unknown" and answer["retry_safe"] is False
+        assert "SECRET" not in json.dumps(answer)
+    assert len([row for row in engine.calls if row[0] == "POST"]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,code", [(403, "PERMISSION_DENIED"), (500, "INTERNAL"), (404, "UNKNOWN")])
+async def test_sdk_mkdir_stat_failure_never_becomes_absent(sdk, status, code):
+    sessions, engine = sdk
+    uri = A + "/folder"
+    engine.stat_fault[uri] = (status, error(code))
+    async with sessions(scope="ov.read ov.write", ov_actions=["read", "write"]) as session:
+        response, answer = await call(session, "memory_mkdir", uri=uri)
+        assert response.is_error and answer["outcome"] == "not_started"
+    assert not engine.effects and not any(row[0] == "POST" for row in engine.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault,expected", [("expire_on_contract", "not_started"),
+                                          ("expire_after_commit", "committed")])
+async def test_mkdir_expiry_before_dispatch_and_after_exact_ack_are_distinct(fault, expected):
+    engine = TypedBackend()
+    engine.fault = fault
+    async with direct(engine) as invoke:
+        answer, failed = await invoke("memory_mkdir", uri=A + "/folder")
+    assert failed and answer["outcome"] == expected
+    assert len(engine.effects) == (1 if expected == "committed" else 0)
+    if expected == "committed":
+        assert answer["resource_type"] == "directory" and answer["indexing"] == "not_observed"
+
+
+@pytest.mark.asyncio
+async def test_sdk_mkdir_off_profile_does_not_expose_or_enable(sdk):
+    sessions, engine = sdk
+    async with sessions(enabled=False, scope="ov.read ov.write", ov_actions=["read", "write"]) as session:
+        assert {tool.name for tool in (await session.list_tools()).tools} == set(SPECS)
+        response, _ = await call(session, "memory_mkdir", uri=A + "/folder")
+        assert response.is_error
+    assert not engine.calls and not engine.effects
 
 
 def test_profile_requires_explicit_resources_config_and_mutation_schema_is_closed():

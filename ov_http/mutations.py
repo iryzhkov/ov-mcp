@@ -30,8 +30,9 @@ MUTATION_SPECS = {
          "storage": {"type": "string", "enum": ["legacy-chunked", "file-deferred-v1"]},
          "expected_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}},
         ["text", "to", "filename"]),
-    "memory_mkdir": ("Source preparation only. Refuses before dispatch: native watch overlap gate is unqualified.",
-                     {"uri": URI}, ["uri"]),
+    "memory_mkdir": ("Create one exact directory and its authorized abstract beneath an existing parent. "
+                     "Completion of indexing is not observed.",
+                     {"uri": URI, "description": {"type": "string", "maxLength": 4096}}, ["uri"]),
     "memory_mv": ("Move source preparation. Currently refuses before dispatch: parent refresh is unqualified.",
                   {"from_uri": URI, "to_uri": URI, "reindex": BOOL}, ["from_uri", "to_uri"]),
     "memory_rm": ("Remove resources only. No extracted-memory cleanup. Dry run is a bounded current plan.",
@@ -250,8 +251,27 @@ class Mutations:
     async def mkdir(self, a):
         uri = a["uri"]
         self.authorize("write", uri, strict=True)
-        self.p.require_action("write", uri.rsplit("/", 1)[0], uri + "/.abstract.md")
-        unsupported("Directory creation watch overlap gate is unqualified; no mkdir dispatched.")
+        if uri in self.p.roots or set(a) - {"uri", "description"}:
+            raise Refused()
+        abstract = uri + "/.abstract.md"
+        self.p.require_action("write", uri.rsplit("/", 1)[0], abstract)
+        payload = {"uri": uri}
+        if "description" in a:
+            description = a["description"]
+            if not isinstance(description, str) or len(description.encode("utf-8")) > 4096:
+                raise Refused()
+            payload["description"] = description
+        parent = await self.existing_parent(uri, "write")
+        if await self.stat(uri) is not None:
+            raise OperationError({"error": "Target exists; no change dispatched.", "outcome": "not_started",
+                                  "conflict": True})
+        value = await self.dispatch("/fs/mkdir", payload,
+                                    [("write", parent), ("write", uri), ("write", abstract)])
+        if not isinstance(value, dict) or value.get("uri") != uri:
+            raise Refused()
+        self.state["mkdir_committed"] = True
+        return {"uri": uri, "outcome": "committed", "resource_type": "directory",
+                "indexing": "not_observed", "searchable_completion": False, "retry_safe": False}
 
     async def remove(self, a, *, prune=False):
         uri = a["uri"]
@@ -351,6 +371,10 @@ async def call_mutation(backend, name, arguments, state):
         return error.value, True
     except (Refused, BudgetExhausted, httpx.HTTPError, TimeoutError,
             ValueError, TypeError, RecursionError):
+        if state.get("mkdir_committed"):
+            return {"error": "Directory created; subsequent completion unavailable.",
+                    "outcome": "committed", "resource_type": "directory",
+                    "indexing": "not_observed", "retry_safe": False}, True
         if state.get("committed"):
             return {"error": "Content committed; subsequent verification unavailable.",
                     "outcome": "committed", "indexing": "deferred", "retry_safe": False}, True
