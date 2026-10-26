@@ -12,6 +12,8 @@ SAFE_ERROR = "Resource unavailable."
 DOC_EXTS = (".md", ".txt", ".yaml", ".yml", ".json", ".toml", ".rst", ".pdf", ".verbatim")
 HIDDEN = {".abstract.md", ".overview.md"}
 ARCHIVE = {"archive", "archived", "_archive"}
+BROWSE_PAGE_LIMIT = 40  # 40 canonical 1024-byte URIs fit the MCP output budget.
+BROWSE_OFFSET_LIMIT = 100000
 
 
 class BudgetExhausted(Exception):
@@ -68,7 +70,7 @@ class Backend:
         if self.requests >= min(request_limit, 128) or self.bytes + 262144 > 1048576:
             raise BudgetExhausted()
 
-    async def _request(self, method: str, endpoint: str, **kwargs):
+    async def _request(self, method: str, endpoint: str, *, envelope: bool = False, **kwargs):
         self.check_budget()
         self.requests += 1
         async with self.client.stream(method, self.config.backend_url + endpoint, **kwargs) as response:
@@ -84,7 +86,7 @@ class Backend:
         result = strict_json(bytes(body))
         if not isinstance(result, dict) or result.get("status") != "ok":
             raise Refused()
-        return result.get("result")
+        return result if envelope else result.get("result")
 
     async def _get(self, endpoint: str, uri: str, **params):
         self.principal.require(uri)
@@ -150,6 +152,53 @@ class Backend:
             except Refused:
                 continue
         return sorted(children, key=natural)
+
+    async def browse_page(self, uri: str, recursive: bool, limit: int, offset: int,
+                          depth: int) -> tuple[list[str], bool]:
+        if (self.config.semantic_profile != RESOURCES_PROFILE
+                or type(limit) is not int or not 1 <= limit <= BROWSE_PAGE_LIMIT
+                or type(offset) is not int or not 0 <= offset <= BROWSE_OFFSET_LIMIT
+                or type(depth) is not int or not 1 <= depth <= 12):
+            raise Refused()
+        self.principal.require_action("read", uri)
+        params = {"uri": uri, "offset": offset, "node_limit": limit, "output": "original",
+                  "include_abstract": "false", "include_overview": "false",
+                  "include_tags": "false", "show_all_hidden": "false"}
+        if recursive:
+            endpoint = "/fs/tree"
+            params.update(level_limit=depth, directories_only="false")
+        else:
+            endpoint = "/fs/ls"
+            params.update(simple="false", recursive="false", sort_by="name", sort_order="asc")
+        page = await self._request("GET", endpoint, envelope=True, params=params)
+        self.principal.require_action("read", uri)
+        if not isinstance(page, dict):
+            raise Refused()
+        entries, more = page.get("result"), page.get("has_more")
+        if (not isinstance(entries, list) or len(entries) > limit or type(more) is not bool
+                or (more and len(entries) != limit)):
+            raise Refused()
+        paths = []
+        for entry in entries:
+            # Original rows preserve denied placeholders that simple ls erases.
+            # Project URIs only after validating the typed row and its authority.
+            if (not isinstance(entry, dict) or type(entry.get("isDir")) is not bool
+                    or entry.get("access") == "denied"):
+                raise Refused()
+            child = entry.get("uri")
+            if not isinstance(child, str):
+                raise Refused()
+            self.principal.require_action("read", child)
+            if not contains(uri, child) or child == uri:
+                raise Refused()
+            relative = child[len(uri) + 1:].split("/")
+            # No hidden summaries, lock files or internal directories. Refuse
+            # unexpected upstream output rather than silently changing offsets.
+            if (any(part.startswith(".") for part in relative)
+                    or len(relative) > (depth if recursive else 1) or child in paths):
+                raise Refused()
+            paths.append(child)
+        return paths, more
 
     async def text(self, uri: str) -> str:
         value = await self._get("/content/read", uri)
@@ -255,6 +304,31 @@ class Reader:
             truncated = True
         entries = sorted(set(entries), key=natural)
         return {"entries": entries[:limit], "truncated": truncated or len(entries) > limit}
+
+    async def paged_listing(self, uri: str | None, recursive: bool, limit: int,
+                            depth: int = 12, offset: int = 0):
+        if (type(limit) is not int or not 1 <= limit <= 100
+                or type(offset) is not int or not 0 <= offset <= BROWSE_OFFSET_LIMIT):
+            raise Refused()
+        roots = self.principal.scopes(uri)
+        # A single authorized directory makes offsets unambiguous. A file-only
+        # grant never causes a parent listing or ancestor metadata request.
+        if len(roots) != 1:
+            raise Refused()
+        root = roots[0]
+        self.principal.require_action("read", root)
+        if not (await self.backend.stat(root))["isDir"]:
+            raise Refused()
+        effective_limit = min(limit, BROWSE_PAGE_LIMIT, BROWSE_OFFSET_LIMIT + 1 - offset)
+        entries, more = await self.backend.browse_page(root, recursive, effective_limit, offset, depth)
+        next_offset = offset + len(entries) if more else None
+        if next_offset is not None and next_offset > BROWSE_OFFSET_LIMIT:
+            next_offset = None
+        return {"entries": entries, "offset": offset, "limit": effective_limit,
+                "has_more": more, "next_offset": next_offset, "truncated": more,
+                "complete": False, "continuation_limited": more and next_offset is None,
+                "depth_limit": depth if recursive else 1,
+                "pagination": "best effort; concurrent edits may repeat or omit paths"}
 
     async def stat(self, uri: str):
         result = await self.backend.stat(uri)
