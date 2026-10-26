@@ -50,7 +50,12 @@ def resources_canonical(uri: str) -> str:
         raise Refused()
     if uri == RESOURCE_ROOT:
         return uri
-    for part in uri[len(RESOURCE_ROOT) + 1:].split("/"):
+    parts = uri[len(RESOURCE_ROOT) + 1:].split("/")
+    # The native default-account watch registry contains every account's tasks.
+    # It is backend control state, outside the resource-document grant.
+    if parts[0] in {".watch_tasks.json", ".watch_tasks.json.bak", ".watch_tasks.json.tmp"}:
+        raise Refused()
+    for part in parts:
         # Upstream shortens components over 255 UTF-8 bytes on reads. Refuse
         # instead of authorizing one name and addressing another storage name.
         if (not part or part in (".", "..") or len(part.encode("utf-8")) > 255

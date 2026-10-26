@@ -45,6 +45,8 @@ INVALID = [
     ROOT + "/\ud800.md", ROOT + "/\udfff.md", ROOT + "/\ud83d\udcda.md",
     ROOT + "/.path.ovlock", ROOT + "/.redirect.json", ROOT + "/.sync_log.json",
     ROOT + "/.exact.ovlock.name", ROOT + "/.relations.json", ROOT + "/.path.ovlock/child.md",
+    ROOT + "/.watch_tasks.json", ROOT + "/.watch_tasks.json.bak",
+    ROOT + "/.watch_tasks.json.tmp", ROOT + "/.watch_tasks.json/child.md",
 ]
 
 
@@ -64,6 +66,24 @@ def test_resources_read_policy_preserves_exact_identity(uri):
 def test_resources_rejects_aliases_controls_surrogates_internal_names(uri):
     with pytest.raises(Refused):
         resources_canonical(uri)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", [".watch_tasks.json", ".watch_tasks.json.bak", ".watch_tasks.json.tmp"])
+async def test_resources_watch_controls_refuse_before_backend_request(name):
+    calls = []
+
+    async def respond(request):
+        calls.append(request)
+        raise AssertionError("control URI reached backend")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        backend = Backend(config(), principal(), client)
+        with pytest.raises(Refused):
+            await backend.stat(ROOT + "/" + name)
+    assert calls == []
+    # Legacy profile admission stays unchanged; only the opt-in policy is tightened.
+    assert canonical(ROOT + "/" + name) == ROOT + "/" + name
 
 
 def test_utf8_byte_bounds_prevent_backend_component_shortening():
