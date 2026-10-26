@@ -241,7 +241,7 @@ class Verifier:
             roots = tuple(sorted(canonical(r) for r in grants))
             if any(contains(a, b) for i, a in enumerate(roots) for b in roots[i + 1:]):
                 raise Refused()
-            if self.config.namespace_roots and any(r not in self.config.namespace_roots for r in roots):
+            if self.config.namespace_roots and any(not self.config.admits_namespace(r) for r in roots):
                 raise Refused()
             actions = ("read",)
             if "ov_actions" in claims:

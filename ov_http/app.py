@@ -23,11 +23,11 @@ LIMIT = {"type": "integer", "minimum": 1, "maximum": 100}
 BOOL = {"type": "boolean"}
 SPECS = {
     "memory_search": ("Scoped semantic search requires the operator-pinned namespace profile. Bounded, incomplete batch.",
-                      {"query": STRING, "scope": {**URI_ARG, "description": "Optional exact granted namespace assertion; all grants remain queried."},
+                      {"query": STRING, "scope": {**URI_ARG, "description": "Optional authorized directory. The resources profile narrows retrieval; the legacy profile asserts an exact grant."},
                        "limit": LIMIT, "group": BOOL,
                        "include_archived": BOOL}, ["query"]),
     "memory_find": ("Scoped semantic find requires the operator-pinned namespace profile. Bounded, incomplete batch.",
-                    {"query": STRING, "scope": {**URI_ARG, "description": "Optional exact granted namespace assertion; all grants remain queried."},
+                    {"query": STRING, "scope": {**URI_ARG, "description": "Optional authorized directory. The resources profile narrows retrieval; the legacy profile asserts an exact grant."},
                        "limit": LIMIT, "group": BOOL,
                      "include_archived": BOOL}, ["query"]),
     "memory_grep": ("Literal substring search over authorized files only. Bounded; grouped by document by default.",

@@ -225,7 +225,7 @@ class Fixture:
         kind = request.url.path.rsplit("/", 1)[-1]
         roots = payload.get("target_uri")
         assert isinstance(roots, list) and roots and roots == sorted(set(roots))
-        assert all(root in (A, B) for root in roots)
+        assert all(root in getattr(self, "semantic_allowed_roots", (A, B)) for root in roots)
         expected = {"query": payload["query"], "target_uri": roots, "context_type": "resource",
                     "limit": 100, "read_content": False, "include_provenance": False, "telemetry": False}
         if kind == "search":
@@ -255,6 +255,9 @@ class Fixture:
                    (A + "/note.md/part_2.md", 89, 2), (A + "/note.md/.abstract.md", 88, 0),
                    (A + "/note.md/.overview.md", 87, 1), (A + "/.abstract.md", 85, 0),
                    (A + "/.overview.md", 84, 1), (A + "/other.md", 80, 2)]
+        # Higher-ranked foreign stores must be excluded before the batch limit.
+        indexed.extend((f"viking://user/default/memories/foreign_{i}.md", 10000 + i, 2)
+                       for i in range(120))
         if self.semantic_many:
             indexed.extend((A + "/extra_" + str(i) + ".md", 500 + i, 2) for i in range(150))
         scoped = [(uri, score, level) for uri, score, level in indexed

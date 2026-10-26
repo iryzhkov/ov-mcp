@@ -6,7 +6,7 @@ import re
 import httpx
 
 from .auth import Principal, Refused, canonical, contains, strict_json
-from .config import Config, SEMANTIC_PROFILE
+from .config import Config, SEMANTIC_PROFILE, RESOURCES_PROFILE
 
 SAFE_ERROR = "Resource unavailable."
 DOC_EXTS = (".md", ".txt", ".yaml", ".yml", ".json", ".toml", ".rst", ".pdf", ".verbatim")
@@ -90,11 +90,11 @@ class Backend:
         self.principal.require(uri)
         return await self._request("GET", endpoint, params={"uri": uri, **params})
 
-    async def semantic(self, kind: str, query: str) -> list[dict]:
-        roots = self.principal.roots
-        if (self.config.semantic_profile != SEMANTIC_PROFILE or kind not in ("search", "find")
-                or not query.strip() or not roots
-                or any(r not in self.config.namespace_roots for r in roots)):
+    async def semantic(self, kind: str, query: str, roots: tuple[str, ...] | None = None) -> list[dict]:
+        roots = self.principal.roots if roots is None else roots
+        if (self.config.semantic_profile not in (SEMANTIC_PROFILE, RESOURCES_PROFILE)
+                or kind not in ("search", "find") or not query.strip() or not roots
+                or any(not self.config.admits_namespace(r) or not self.principal.allows(r) for r in roots)):
             raise Refused()
         # Namespace types must remain immutable through the following POST.
         # This preflight rejects missing/file roots, but is not an atomic lock.
@@ -317,10 +317,15 @@ class Reader:
 
     async def semantic(self, kind: str, query: str, scope: str | None, limit: int,
                        group: bool, include_archived: bool):
-        # Retain the old argument as an assertion, never a backend target selector.
-        if scope is not None and scope not in self.principal.roots:
+        roots = None
+        if self.backend.config.semantic_profile == RESOURCES_PROFILE:
+            if scope is not None:
+                roots = (self.principal.require(scope),)
+        elif scope is not None and scope not in self.principal.roots:
+            # Preserve the legacy profile: scope asserts an exact grant and
+            # never changes the complete set of backend targets.
             raise Refused()
-        hits = await self.backend.semantic(kind, query)
+        hits = await self.backend.semantic(kind, query, roots)
         matches = {}
         for hit in sorted(hits, key=lambda h: h["score"], reverse=True):
             uri = hit["uri"]
