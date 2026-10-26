@@ -56,7 +56,9 @@ replacement was delete-then-write, and the current OpenViking backend (0.5.2) re
 request this adapter sends: replacing a note deleted it and wrote nothing back. Overwrite now
 refuses before any backend call, as do `memory_reindex` and `memory_mv` with its default
 `reindex=True`, which deleted and re-ingested notes the same way. A native replacement is not yet
-available.
+available. These refusals apply on every backend, including older versions whose legacy ingestion
+API was compatible. Plain new writes still use that legacy API and currently fail on 0.5.2 without
+replacing existing content.
 
 Note that a note written through `/resources` is *ingested*: OpenViking stores it as a directory of
 chunks rather than as a plain file. Passing a `to` that already holds a document therefore nests a
@@ -94,15 +96,16 @@ that name clears it on its own, because an empty directory is not a note.
 ## Working around OpenViking 0.2.6
 
 Three server behaviours are wrong or misleading in ways an agent cannot see. Each of the
-workarounds below was verified against a live 0.2.6 server; if a later release fixes the behaviour,
-the workaround becomes a no-op rather than a hazard.
+workarounds below was verified against a live 0.2.6 server. They describe that legacy version;
+newer backends require separately qualified native operations, and legacy re-ingestion is disabled.
 
 **`POST /fs/mv` half-updates the vector index.** It rewrites the index records of the files it can
 list, but `.abstract.md` and `.overview.md` are filtered out of that listing, so their records keep
 pointing at the old URI. They then outrank live notes for their subject and resolve to nothing.
 `memory_mv` prunes those orphans after the move. Re-ingesting the moved documents so their abstracts
 index at the new location (`reindex=True`, the default) is temporarily disabled, so a move needs
-`reindex=False`.
+`reindex=False`. The moved abstracts cannot be rebuilt at their new location through this adapter
+until the native integration is available.
 
 **`DELETE /fs` cannot clean up after it.** OpenViking removes the node first and cleans the index
 second, so on a node that is already gone it raises before the cleanup runs and the orphaned record
