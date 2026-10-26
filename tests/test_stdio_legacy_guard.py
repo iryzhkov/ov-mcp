@@ -250,6 +250,17 @@ def bad_spec(edit) -> dict:
     bad_spec(lambda s: model_of(s).update(required=["to", 1])),
     bad_spec(lambda s: model_of(s).update(allOf=[{"required": ["path"]}])),
     bad_spec(lambda s: model_of(s)["properties"].update(temp_path=False)),
+    bad_spec(lambda s: model_of(s).update(minProperties=1)),
+    bad_spec(lambda s: model_of(s).update(additionalProperties={"type": "string"})),
+    bad_spec(lambda s: model_of(s).update(type="array")),
+    bad_spec(lambda s: model_of(s)["properties"].update(
+        temp_path={"type": "string", "pattern": "^/"})),
+    bad_spec(lambda s: model_of(s)["properties"].update(to={"enum": ["viking://x"]})),
+    bad_spec(lambda s: model_of(s)["properties"].update(
+        wait={"$ref": "#/components/schemas/AddResourceRequest"})),
+    bad_spec(lambda s: model_of(s)["properties"].update(
+        reason={"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]})),
+    bad_spec(lambda s: model_of(s)["properties"].update(timeout={"type": 5})),
 ])
 def test_malformed_or_cyclic_schema_fails_closed_and_is_not_cached(backend, spec):
     backend.spec = spec
@@ -271,6 +282,72 @@ def test_a_required_field_the_legacy_body_omits_is_refused(backend):
         assert "requires path" in reply
     assert backend.mutations == []
     assert backend.files[CHUNK] == OLD_TEXT
+
+
+REF = "#/components/schemas/AddResourceRequest"
+
+
+def body_schema(spec: dict, value: dict) -> dict:
+    spec["paths"]["/api/v1/resources"]["post"]["requestBody"]["content"][
+        "application/json"]["schema"] = value
+    return spec
+
+
+def component_ref_sibling(spec: dict) -> None:
+    spec["components"]["schemas"]["Wrapper"] = {"$ref": REF, "required": ["path"]}
+    body_schema(spec, {"$ref": "#/components/schemas/Wrapper"})
+
+
+@pytest.mark.parametrize("backend", [("classic",)], indirect=True)
+@pytest.mark.parametrize("spec", [
+    bad_spec(lambda s: body_schema(s, {"$ref": REF, "allOf": [{"required": ["path"]}]})),
+    bad_spec(lambda s: body_schema(s, {"$ref": REF, "required": ["path"]})),
+    bad_spec(component_ref_sibling),
+])
+def test_ref_with_sibling_constraints_is_refused_before_any_change(backend, spec):
+    backend.spec = spec
+    for reply in (server.memory_reindex(NOTE),
+                  server.memory_mv(NOTE, "viking://resources/ns/moved.md"),
+                  server.memory_write("new", "viking://resources/ns", "note.md",
+                                      overwrite=True)):
+        assert reply.startswith("Refused, nothing changed"), reply
+        assert "does not describe" in reply
+    assert backend.mutations == []
+    assert backend.files[CHUNK] == OLD_TEXT
+    assert server._legacy_ingest_cache is None
+
+
+@pytest.mark.parametrize("backend", [("classic",)], indirect=True)
+@pytest.mark.parametrize("field, value", [
+    ("wait", {"type": "string"}),
+    ("temp_path", {"anyOf": [{"type": "integer"}, {"type": "null"}]}),
+    ("timeout", {"type": "string", "title": "Timeout"}),
+    ("to", {"type": ["array", "null"]}),
+])
+def test_a_legacy_field_typed_against_the_sent_value_is_refused(backend, field, value):
+    spec = schema("classic")
+    model_of(spec)["properties"][field] = value
+    backend.spec = spec
+    reply = server.memory_reindex(NOTE)
+    assert_refused_untouched(reply, backend)
+    assert f"types {field} differently" in reply
+
+
+@pytest.mark.parametrize("backend", [("classic",)], indirect=True)
+def test_a_typed_compatible_schema_still_passes(backend):
+    spec = schema("classic")
+    model_of(spec).update(title="AddResourceRequest", description="Legacy body.",
+                          additionalProperties=False, required=["to"])
+    model_of(spec)["properties"].update(
+        temp_path={"anyOf": [{"type": "string"}, {"type": "null"}], "title": "Temp Path"},
+        to={"type": "string", "title": "To"},
+        reason={"type": "string", "default": "", "title": "Reason"},
+        wait={"type": "boolean", "default": False},
+        timeout={"anyOf": [{"type": "number"}, {"type": "null"}], "default": None},
+        path={"pattern": "ignored because the legacy body never sends path"})
+    backend.spec = spec
+    assert server._legacy_ingest_problem() is None
+    assert server.memory_reindex(NOTE) == "Reindexed 1 document(s)."
 
 
 @pytest.mark.parametrize("backend", [("classic",)], indirect=True)

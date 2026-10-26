@@ -951,16 +951,59 @@ def _snapshot(uri: str) -> str | None:
 # Only a refusal is remembered, for a few minutes: a backend can be swapped
 # under a running process, so a pass is re-checked by every destructive call,
 # and an unreadable or malformed schema is never remembered.
+#
+# The schema is read through a small closed list of forms: a pure $ref, an
+# object with properties, required and a boolean additionalProperties, and
+# legacy fields that are either unconstrained or typed by `type` or an anyOf
+# of bare types. Annotations are ignored. Any other keyword, wherever it
+# appears, refuses rather than being skipped, so a richer schema that a
+# compatible backend could publish is refused too. That false refusal is the
+# intended cost; this is not a JSON Schema validator.
 LEGACY_INGEST_FIELDS = ("temp_path", "to", "reason", "wait", "timeout")
 LEGACY_INGEST_TTL = 300.0
 SCHEMA_REF_PREFIX = "#/components/schemas/"
 SCHEMA_REF_DEPTH = 8
+SCHEMA_ANNOTATIONS = frozenset({"title", "description", "default", "examples", "deprecated"})
+SCHEMA_OBJECT_KEYWORDS = SCHEMA_ANNOTATIONS | {"type", "properties", "required",
+                                               "additionalProperties"}
+SCHEMA_FIELD_KEYWORDS = SCHEMA_ANNOTATIONS | {"type", "anyOf"}
 _legacy_ingest_cache: tuple[float, str] | None = None
+
+
+def _legacy_body_types() -> dict[str, set[str]]:
+    """The JSON types of the values the legacy body sends, field by field."""
+    timeout = {"number", "integer"} if float(TIMEOUT).is_integer() else {"number"}
+    return {"temp_path": {"string"}, "to": {"string"}, "reason": {"string"},
+            "wait": {"boolean"}, "timeout": timeout}
+
+
+def _type_names(value: Any) -> set[str]:
+    names = [value] if isinstance(value, str) else value
+    if not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names):
+        raise ValueError("type")
+    return set(names)
+
+
+def _field_types(field: Any) -> set[str] | None:
+    """The types a legacy field's schema allows, or None if it allows any value.
+    ValueError for any form outside the closed list above."""
+    if not isinstance(field, dict) or set(field) - SCHEMA_FIELD_KEYWORDS:
+        raise ValueError("field")
+    types = _type_names(field["type"]) if "type" in field else None
+    if "anyOf" in field:
+        branches = field["anyOf"]
+        if (not isinstance(branches, list) or not branches
+                or any(not isinstance(b, dict) or set(b) != {"type"} for b in branches)):
+            raise ValueError("anyOf")
+        union = set().union(*(_type_names(b["type"]) for b in branches))
+        types = union if types is None else types & union
+    return types
 
 
 def _resolve_schema(spec: dict, schema: Any) -> dict | None:
     """Follow local $refs to a schema object; None for a cycle, a long chain,
-    a reference outside components/schemas, or anything not shaped like one."""
+    a reference outside components/schemas, a $ref with any sibling keyword
+    (it could add constraints), or anything not shaped like a schema."""
     seen: set[str] = set()
     for _ in range(SCHEMA_REF_DEPTH):
         if not isinstance(schema, dict):
@@ -968,6 +1011,8 @@ def _resolve_schema(spec: dict, schema: Any) -> dict | None:
         ref = schema.get("$ref")
         if ref is None:
             return schema
+        if len(schema) != 1:
+            return None
         if not isinstance(ref, str) or not ref.startswith(SCHEMA_REF_PREFIX) or ref in seen:
             return None
         seen.add(ref)
@@ -1007,16 +1052,23 @@ def _legacy_ingest_problem() -> str | None:
     if not isinstance(schema, dict) or not isinstance(properties, dict):
         return "its API schema does not describe POST /api/v1/resources"
     # The body is compatible only if the schema can be read as plainly as this
-    # check reads it: no combinators that could add constraints, every legacy
-    # field it declares described by a schema object, and a required list of
-    # names that the legacy body actually sends.
+    # check reads it (see the closed list above), its required names are all
+    # sent by the legacy body, and each legacy field it types takes the type
+    # of the value actually sent.
+    unreadable = "its API schema does not describe POST /api/v1/resources in a form this check reads"
     required = schema.get("required", [])
-    if (any(k in schema for k in ("allOf", "anyOf", "oneOf", "not", "if"))
+    additional = schema.get("additionalProperties", True)
+    if (set(schema) - SCHEMA_OBJECT_KEYWORDS
+            or schema.get("type", "object") != "object"
+            or not isinstance(additional, bool)
             or not isinstance(required, list)
-            or not all(isinstance(name, str) for name in required)
-            or any(not isinstance(properties[f], dict)
-                   for f in LEGACY_INGEST_FIELDS if f in properties)):
-        return "its API schema does not describe POST /api/v1/resources in a form this check reads"
+            or not all(isinstance(name, str) for name in required)):
+        return unreadable
+    try:
+        field_types = {f: _field_types(properties[f])
+                       for f in LEGACY_INGEST_FIELDS if f in properties}
+    except ValueError:
+        return unreadable
     unsent = [name for name in required if name not in LEGACY_INGEST_FIELDS]
     if unsent:
         problem = ("its POST /api/v1/resources requires " + ", ".join(unsent)
@@ -1029,6 +1081,14 @@ def _legacy_ingest_problem() -> str | None:
                    + ", ".join(missing) + " (it takes "
                    + ("temp_file_id" if "temp_file_id" in properties else "a different body")
                    + ")")
+        _legacy_ingest_cache = (now, problem)
+        return problem
+    sent = _legacy_body_types()
+    mistyped = [f for f, allowed in field_types.items()
+                if allowed is not None and not allowed & sent[f]]
+    if mistyped:
+        problem = ("its POST /api/v1/resources types " + ", ".join(mistyped)
+                   + " differently from the values the legacy request sends")
         _legacy_ingest_cache = (now, problem)
         return problem
     return None
