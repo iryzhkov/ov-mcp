@@ -1160,7 +1160,7 @@ def memory_index_prune(uri: str) -> str:
         return f"Refused: only paths under {RESOURCES_ROOT}/ may be pruned."
     if _exists(uri):
         return (f"{uri} exists, so its index record is not an orphan. Use memory_rm to delete the "
-                "note itself, or memory_reindex to rebuild its records.")
+                "note itself. Legacy memory_reindex is temporarily disabled.")
     if _prune_index(uri):
         return f"Pruned the index record for {uri}. Search should stop returning it immediately."
     return f"Could not prune {uri}: the placeholder needed to reach the index cleanup could not be created."
