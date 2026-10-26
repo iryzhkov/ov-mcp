@@ -22,9 +22,9 @@ URI = {"type": "string", "minLength": 1, "maxLength": 1024}
 BOOL = {"type": "boolean"}
 MUTATION_SPECS = {
     "memory_write": (
-        "Conditional single-file source preparation. Select storage=file-deferred-v1 explicitly. "
-        "Content commit leaves indexing deferred; legacy chunk ingestion and verbatim are unsupported.",
-        {"text": {"type": "string", "maxLength": 16384}, "to": URI, "filename": URI,
+        "Conditional document publication with observed typed revisions and retained protected backups. "
+        "Processing acceptance is not revision-bound indexing. Explicit file-deferred-v1 stays deferred.",
+        {"text": {"type": "string", "maxLength": 1048576}, "to": URI, "filename": URI,
          "reason": {"type": "string", "maxLength": 1024}, "overwrite": BOOL, "archived": BOOL,
          "verbatim": BOOL, "verify": BOOL,
          "storage": {"type": "string", "enum": ["legacy-chunked", "file-deferred-v1"]},
@@ -82,7 +82,8 @@ class Mutations:
             if strict and any(c.isspace() for c in uri):
                 raise Refused()
 
-    async def request(self, method, endpoint, *, effect=False, precondition_conflicts=True, **kwargs):
+    async def request(self, method, endpoint, *, effect=False, precondition_conflicts=True,
+                      error_projection=None, **kwargs):
         b = self.backend
         b.check_budget()
         b.requests += 1
@@ -107,6 +108,8 @@ class Mutations:
         if not isinstance(error, dict) or value.get("status") != "error":
             raise Refused()
         code = error.get("code")
+        if effect and error_projection is not None:
+            error_projection(status, error)
         if not effect and status == 404 and code == "NOT_FOUND":
             return None
         if (effect and precondition_conflicts and status == 409
@@ -199,6 +202,11 @@ class Mutations:
         return nodes
 
     async def write(self, a):
+        if a.get("storage", "legacy-chunked") == "legacy-chunked":
+            from .document_write import DocumentWriter
+            return await DocumentWriter(self).write(a)
+        if a.get("storage") != "file-deferred-v1":
+            raise Refused()
         to = a["to"]
         self.authorize("write", to, strict=True)
         filename = a["filename"]
@@ -474,12 +482,26 @@ async def call_mutation(backend, name, arguments, state):
         async with asyncio.timeout(remaining):
             value = await operation.run(name, arguments)
         backend.principal.require_action("read")
+        if state.get("document_committed"):
+            verification = value.get("verification", {})
+            if (value.get("processing_state") == "failed"
+                    or isinstance(verification, dict) and verification.get("status") == "different"):
+                value["error"] = "Content committed; processing or observed round-trip differs. Do not retry automatically."
+                return value, True
         if name == "memory_reindex" and value.get("indexing") != "completed":
             return value, True
         if name == "memory_write" and value.get("verification") == "mismatch":
             value["error"] = "Content committed; exact round-trip verification failed. Do not retry automatically."
             return value, True
         return value, False
+    except asyncio.CancelledError:
+        if state.get("document_committed"):
+            value = dict(state["document_committed"])
+            value["error"] = "Content committed; subsequent observation cancelled."
+            return value, True
+        if state.get("document_write") and state.get("dispatched"):
+            return dict(UNKNOWN), True
+        raise
     except OperationError as error:
         # A later audit prune conflict must not hide earlier completed prunes.
         if state.get("dispatched") or state.get("effects_confirmed"):
@@ -487,6 +509,10 @@ async def call_mutation(backend, name, arguments, state):
         return error.value, True
     except (Refused, BudgetExhausted, httpx.HTTPError, TimeoutError,
             ValueError, TypeError, RecursionError):
+        if state.get("document_committed"):
+            value = dict(state["document_committed"])
+            value["error"] = "Content committed; subsequent observation unavailable."
+            return value, True
         if state.get("move_committed"):
             return {"error": "Move committed; subsequent completion unavailable.",
                     "outcome": "committed", "indexing": "not_observed", "retry_safe": False}, True
