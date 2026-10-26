@@ -38,6 +38,13 @@ def fixed_url(value: str, *, https: bool = True) -> str:
 
 SEMANTIC_REVISION = "68e66ec8998957e1af3cae8a661947fe77cd9578"
 SEMANTIC_PROFILE = "namespace-directories-v1"
+RESOURCES_PROFILE = "resources-directories-v052-v1"
+# Search-path source qualified by the isolated v0.5.2 package proof. A changed
+# backend artifact still needs its own final source/artifact qualification.
+RESOURCES_REVISION = "7f3ae1af822d936c1d0b070537772b0f1d59122f"
+RESOURCE_ROOT = "viking://resources"
+LEGACY_URI_POLICY = "legacy-ascii-v1"
+RESOURCES_URI_POLICY = "resources-utf8-read-v1"
 
 
 @dataclass(frozen=True)
@@ -67,12 +74,15 @@ class Config:
             raise ValueError("invalid listen port")
         if not Path(self.backend_secret_file).is_absolute():
             raise ValueError("secret file path must be absolute")
-        if self.semantic_profile not in ("disabled", SEMANTIC_PROFILE):
+        if self.semantic_profile not in ("disabled", SEMANTIC_PROFILE, RESOURCES_PROFILE):
             raise ValueError("unknown semantic profile")
         roots = self.namespace_roots
         if not isinstance(roots, (list, tuple)) or len(roots) > 16:
             raise ValueError("invalid namespace admission")
-        if any(not isinstance(r, str) or not re.fullmatch(
+        if self.semantic_profile == RESOURCES_PROFILE:
+            if tuple(roots) != (RESOURCE_ROOT,):
+                raise ValueError("resources profile requires the resources root alone")
+        elif any(not isinstance(r, str) or not re.fullmatch(
                 r"viking://resources/[A-Za-z0-9_@+,=-][A-Za-z0-9_.@+,=-]{0,127}", r) for r in roots):
             raise ValueError("admit explicit top-level namespace directories only")
         if len(set(roots)) != len(roots):
@@ -81,8 +91,20 @@ class Config:
         if self.semantic_profile == "disabled":
             if self.semantic_backend_revision != "" or roots:
                 raise ValueError("disabled profile cannot select semantic backend or namespaces")
-        elif self.semantic_backend_revision != SEMANTIC_REVISION or not roots:
-            raise ValueError("semantic profile requires exact backend revision and namespace admission")
+        else:
+            expected = RESOURCES_REVISION if self.semantic_profile == RESOURCES_PROFILE else SEMANTIC_REVISION
+            if self.semantic_backend_revision != expected or not roots:
+                raise ValueError("semantic profile requires exact backend revision and namespace admission")
+
+    @property
+    def uri_policy(self) -> str:
+        # Runtime profile selects authority rules; bearer claims cannot select them.
+        return RESOURCES_URI_POLICY if self.semantic_profile == RESOURCES_PROFILE else LEGACY_URI_POLICY
+
+    def admits_namespace(self, root: str) -> bool:
+        if self.semantic_profile == RESOURCES_PROFILE:
+            return root == RESOURCE_ROOT or root.startswith(RESOURCE_ROOT + "/")
+        return root in self.namespace_roots
 
     @property
     def origin(self) -> str:

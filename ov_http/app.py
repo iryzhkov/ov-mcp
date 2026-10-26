@@ -14,7 +14,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .auth import Principal, Refused, Verifier
-from .config import Config
+from .config import Config, RESOURCES_PROFILE
 from .reader import Backend, BudgetExhausted, Reader, SAFE_ERROR
 
 STRING = {"type": "string", "minLength": 1, "maxLength": 1024}
@@ -23,11 +23,11 @@ LIMIT = {"type": "integer", "minimum": 1, "maximum": 100}
 BOOL = {"type": "boolean"}
 SPECS = {
     "memory_search": ("Scoped semantic search requires the operator-pinned namespace profile. Bounded, incomplete batch.",
-                      {"query": STRING, "scope": {**URI_ARG, "description": "Optional exact granted namespace assertion; all grants remain queried."},
+                      {"query": STRING, "scope": {**URI_ARG, "description": "Optional authorized directory. The resources profile narrows retrieval; the legacy profile asserts an exact grant."},
                        "limit": LIMIT, "group": BOOL,
                        "include_archived": BOOL}, ["query"]),
     "memory_find": ("Scoped semantic find requires the operator-pinned namespace profile. Bounded, incomplete batch.",
-                    {"query": STRING, "scope": {**URI_ARG, "description": "Optional exact granted namespace assertion; all grants remain queried."},
+                    {"query": STRING, "scope": {**URI_ARG, "description": "Optional authorized directory. The resources profile narrows retrieval; the legacy profile asserts an exact grant."},
                        "limit": LIMIT, "group": BOOL,
                      "include_archived": BOOL}, ["query"]),
     "memory_grep": ("Literal substring search over authorized files only. Bounded; grouped by document by default.",
@@ -54,8 +54,11 @@ SPECS = {
 }
 
 
-def schema(name):
+def schema(name, profile="disabled"):
     _, properties, required = SPECS[name]
+    if profile == RESOURCES_PROFILE and name in ("memory_ls", "memory_tree"):
+        properties = {**properties, "offset": {"type": "integer", "minimum": 0, "maximum": 100000,
+                      "description": "Visible-node offset. Reauthorized each call; best effort under concurrent edits. Page cap 40. Multiple grants require an explicit directory URI."}}
     return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
 
 
@@ -145,7 +148,7 @@ def create_app(config: Config, *, jwks_ssl_context: ssl.SSLContext | None = None
 
     async def list_tools(ctx, params):
         return ListToolsResult(tools=[
-            Tool(name=name, description=description, input_schema=schema(name),
+            Tool(name=name, description=description, input_schema=schema(name, config.semantic_profile),
                  annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False,
                                              idempotent_hint=True, open_world_hint=False))
             for name, (description, _, _) in SPECS.items()
@@ -156,7 +159,7 @@ def create_app(config: Config, *, jwks_ssl_context: ssl.SSLContext | None = None
             name, arguments = params.name, params.arguments or {}
             if name not in SPECS:
                 return result({"error": "Tool unavailable."}, True)
-            jsonschema.validate(arguments, schema(name))
+            jsonschema.validate(arguments, schema(name, config.semantic_profile))
             request = ctx.request
             principal = request.scope.get("ov.principal") if request is not None else None
             if not isinstance(principal, Principal):
@@ -175,6 +178,14 @@ def create_app(config: Config, *, jwks_ssl_context: ssl.SSLContext | None = None
                                                   arguments.get("scope"), arguments.get("limit", 10),
                                                   arguments.get("group", True),
                                                   arguments.get("include_archived", False))
+                elif (name in ("memory_ls", "memory_tree")
+                        and config.semantic_profile == RESOURCES_PROFILE):
+                    value = await reader.paged_listing(
+                        arguments.get("uri"),
+                        name == "memory_tree" or arguments.get("recursive", False),
+                        arguments.get("limit", 100 if name == "memory_tree" else 50),
+                        arguments.get("level_limit", 2) if name == "memory_tree" else 12,
+                        arguments.get("offset", 0))
                 elif name == "memory_ls":
                     value = await reader.listing(arguments.get("uri"), arguments.get("recursive", False),
                                                  arguments.get("limit", 50))
@@ -206,7 +217,7 @@ def create_app(config: Config, *, jwks_ssl_context: ssl.SSLContext | None = None
             return result({"error": SAFE_ERROR}, True)
 
     server = Server("ov-http-reader", version="0.1.0", on_list_tools=list_tools, on_call_tool=call_tool,
-                    get_tool_input_schema=lambda name: schema(name) if name in SPECS else None)
+                    get_tool_input_schema=lambda name: schema(name, config.semantic_profile) if name in SPECS else None)
 
     async def health(request):
         return JSONResponse({"ok": True})
