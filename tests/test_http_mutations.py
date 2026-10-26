@@ -54,6 +54,7 @@ class TypedBackend:
         self.on_contract = None
         self.read_fault = False
         self.on_effect = None
+        self.reindex_changes = {}
 
     def reply(self, method, path, params, body):
         self.calls.append((method, path, params, body))
@@ -126,6 +127,32 @@ class TypedBackend:
             value = {"root_uri": body["root_uri"], "created": [] if exists else [uri],
                      "updated": [uri] if exists else [], "unchanged": [], "queue_status": None,
                      "semantic_status": "deferred", "vector_status": "deferred", "source": "SECRET"}
+        elif path == "/fs/mv":
+            assert set(body) == {"from_uri", "to_uri", "no_replace"} and body["no_replace"] is True
+            source, target = body["from_uri"], body["to_uri"]
+            assert source.rsplit("/", 1)[0] in self.dirs and target.rsplit("/", 1)[0] in self.dirs
+            if target in self.files or target in self.dirs:
+                return 409, error("ALREADY_EXISTS")
+            moved_files = {target + name[len(source):]: value for name, value in self.files.items()
+                           if name == source or name.startswith(source + "/")}
+            self.files = {name: value for name, value in self.files.items()
+                          if not (name == source or name.startswith(source + "/"))}
+            self.files.update(moved_files)
+            self.dirs = {target + name[len(source):] if name == source or name.startswith(source + "/")
+                         else name for name in self.dirs}
+            self.effects.append((path, source))
+            value = {"from": source, "to": target, "no_replace": True, "source": "SECRET"}
+        elif path == "/content/reindex":
+            assert set(body) == {"uri", "mode", "wait", "recursive", "force"}
+            assert body["mode"] == "vectors_only" and body["wait"] is True and body["recursive"] is True
+            assert type(body["force"]) is bool
+            uri = body["uri"]
+            self.effects.append((path, uri))
+            value = {"uri": uri, "mode": "vectors_only", "object_type": "resource", "status": "completed",
+                     "scanned_records": 1, "rebuilt_records": 1, "deleted_records": 0,
+                     "unsupported_records": 0, "failed_records": 0, "duration_ms": 3,
+                     "warnings": [], "task_id": "SECRET", "source": "/host/SECRET"}
+            value.update(self.reindex_changes)
         elif path == "/fs/mkdir":
             assert set(body) <= {"uri", "description"} and "uri" in body
             uri = body["uri"]
@@ -350,8 +377,8 @@ async def test_unsupported_routes_and_legacy_write_preserve_defaults_and_old_chu
             ("memory_write", {"to": A, "filename": "new.md", "text": "body"}),
             ("memory_write", write_args(filename="chunked.md", overwrite=True, expected_sha256="0" * 64)),
             ("memory_write", write_args(verbatim=True)),
-            ("memory_mv", {"from_uri": DOC, "to_uri": A + "/dest.md"}),
-            ("memory_reindex", {"uri": A + "/chunked.md"}),
+            ("memory_mv", {"from_uri": DOC, "to_uri": A + "/dest.md", "reindex": False}),
+            ("memory_reindex", {"uri": ROOT}),
         ]:
             answer, failed = await invoke(name, **args)
             assert failed and answer["outcome"] == "not_started"
