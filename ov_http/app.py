@@ -16,6 +16,7 @@ from starlette.routing import Route
 from .auth import Principal, Refused, Verifier
 from .config import Config, RESOURCES_PROFILE
 from .reader import Backend, BudgetExhausted, Reader, SAFE_ERROR
+from .mutations import MUTATION_SPECS, READ_ONLY, UNKNOWN, call_mutation
 
 STRING = {"type": "string", "minLength": 1, "maxLength": 1024}
 URI_ARG = {**STRING, "description": "Canonical viking://resources/... URI within this token's grants."}
@@ -55,7 +56,7 @@ SPECS = {
 
 
 def schema(name, profile="disabled"):
-    _, properties, required = SPECS[name]
+    _, properties, required = (SPECS if name in SPECS else MUTATION_SPECS)[name]
     if profile == RESOURCES_PROFILE and name in ("memory_ls", "memory_tree"):
         properties = {**properties, "offset": {"type": "integer", "minimum": 0, "maximum": 100000,
                       "description": "Visible-node offset. Reauthorized each call; best effort under concurrent edits. Page cap 40. Multiple grants require an explicit directory URI."}}
@@ -104,6 +105,7 @@ class SecurityGate:
                                           scope, receive, send)
         scope = dict(scope)
         scope["ov.principal"] = principal
+        scope["ov.operation"] = {}
         # A stateless POST has no durable session for a later cancellation
         # notification. Its HTTP disconnect must cancel in-flight backend work.
         messages = asyncio.Queue(maxsize=1)
@@ -121,7 +123,8 @@ class SecurityGate:
             done, _ = await asyncio.wait({request_task, disconnect_task}, timeout=25,
                                          return_when=asyncio.FIRST_COMPLETED)
             if not done:
-                await JSONResponse({"error": "Request timeout."}, status_code=408)(scope, receive, send)
+                timeout_value = UNKNOWN if scope["ov.operation"].get("dispatched") else {"error": "Request timeout."}
+                await JSONResponse(timeout_value, status_code=408)(scope, receive, send)
             if request_task.done():
                 await request_task
         finally:
@@ -146,18 +149,22 @@ def create_app(config: Config, *, jwks_ssl_context: ssl.SSLContext | None = None
                                    limits=httpx.Limits(max_connections=2, max_keepalive_connections=2))
     verifier = Verifier(config, jwks_client)
 
+    catalog = {**SPECS, **MUTATION_SPECS} if config.mutation_profile != "disabled" else SPECS
+
     async def list_tools(ctx, params):
         return ListToolsResult(tools=[
             Tool(name=name, description=description, input_schema=schema(name, config.semantic_profile),
-                 annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False,
-                                             idempotent_hint=True, open_world_hint=False))
-            for name, (description, _, _) in SPECS.items()
+                 annotations=ToolAnnotations(read_only_hint=name in SPECS or name in READ_ONLY,
+                                             destructive_hint=name not in SPECS and name not in READ_ONLY,
+                                             idempotent_hint=name in SPECS or name in READ_ONLY,
+                                             open_world_hint=False))
+            for name, (description, _, _) in catalog.items()
         ])
 
     async def call_tool(ctx, params):
         try:
             name, arguments = params.name, params.arguments or {}
-            if name not in SPECS:
+            if name not in catalog:
                 return result({"error": "Tool unavailable."}, True)
             jsonschema.validate(arguments, schema(name, config.semantic_profile))
             request = ctx.request
@@ -171,7 +178,11 @@ def create_app(config: Config, *, jwks_ssl_context: ssl.SSLContext | None = None
             if name in ("memory_search", "memory_find") and config.semantic_profile == "disabled":
                 return result({"error": "Scoped semantic search unavailable: pinned namespace profile required. "
                               "Use memory_grep or memory_glob."}, True)
-            reader = Reader(Backend(config, principal, backend_client))
+            backend = Backend(config, principal, backend_client)
+            if name in MUTATION_SPECS:
+                value, error = await call_mutation(backend, name, arguments, request.scope["ov.operation"])
+                return result(value, error)
+            reader = Reader(backend)
             async with asyncio.timeout(20):
                 if name in ("memory_search", "memory_find"):
                     value = await reader.semantic(name.removeprefix("memory_"), arguments["query"],
@@ -217,14 +228,16 @@ def create_app(config: Config, *, jwks_ssl_context: ssl.SSLContext | None = None
             return result({"error": SAFE_ERROR}, True)
 
     server = Server("ov-http-reader", version="0.1.0", on_list_tools=list_tools, on_call_tool=call_tool,
-                    get_tool_input_schema=lambda name: schema(name, config.semantic_profile) if name in SPECS else None)
+                    get_tool_input_schema=lambda name: schema(name, config.semantic_profile) if name in catalog else None)
 
     async def health(request):
         return JSONResponse({"ok": True})
 
     async def metadata(request):
         return JSONResponse({"resource": config.resource, "authorization_servers": [config.issuer],
-                             "scopes_supported": ["ov.read"], "bearer_methods_supported": ["header"]})
+                             "scopes_supported": (["ov.read", "ov.write", "ov.remove", "ov.maintain"]
+                                                  if config.mutation_profile != "disabled" else ["ov.read"]),
+                             "bearer_methods_supported": ["header"]})
 
     sdk_app = server.streamable_http_app(
         json_response=True, stateless_http=True, max_request_body_size=32768,

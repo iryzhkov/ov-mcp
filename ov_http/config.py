@@ -59,6 +59,7 @@ class Config:
     semantic_profile: str = "disabled"
     semantic_backend_revision: str = ""
     namespace_roots: tuple[str, ...] = ()
+    mutation_profile: str = "disabled"
 
     def __post_init__(self):
         for value in (self.resource, self.issuer, self.jwks_url):
@@ -76,6 +77,10 @@ class Config:
             raise ValueError("secret file path must be absolute")
         if self.semantic_profile not in ("disabled", SEMANTIC_PROFILE, RESOURCES_PROFILE):
             raise ValueError("unknown semantic profile")
+        if self.mutation_profile not in ("disabled", "resources-document-mutations-v1"):
+            raise ValueError("unknown mutation profile")
+        if self.mutation_profile != "disabled" and self.semantic_profile != RESOURCES_PROFILE:
+            raise ValueError("mutation profile requires the resources read profile")
         roots = self.namespace_roots
         if not isinstance(roots, (list, tuple)) or len(roots) > 16:
             raise ValueError("invalid namespace admission")
