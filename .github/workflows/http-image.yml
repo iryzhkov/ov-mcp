@@ -1,0 +1,33 @@
+name: HTTP image artifact
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  artifact:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Build the reviewed context and record custody
+        shell: bash
+        run: |
+          export HOME="$GITHUB_WORKSPACE/.scratch/home"
+          export TMPDIR="$GITHUB_WORKSPACE/.scratch/tmp"
+          export DOCKER_CONFIG="$HOME/.docker"
+          export PYTHONDONTWRITEBYTECODE=1
+          test "$HOME" = "$GITHUB_WORKSPACE/.scratch/home"
+          test "$TMPDIR" = "$GITHUB_WORKSPACE/.scratch/tmp"
+          mkdir -p "$HOME" "$TMPDIR"
+          python3 -B .github/scripts/http_image_artifact.py
+      # actions/upload-artifact v4.6.2, resolved from the official repository tag.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: http-image-${{ github.run_id }}-${{ github.sha }}
+          path: http-image-artifact/
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
