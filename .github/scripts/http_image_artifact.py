@@ -71,6 +71,22 @@ def stage_context():
     return records
 
 
+def normalized_config(config):
+    # Docker <28.2 adds container-only defaults; <29 also includes empty OCI fields.
+    # https://docs.docker.com/engine/deprecated/#non-standard-fields-in-image-inspect
+    defaults = {
+        "Hostname": "", "Domainname": "", "User": "", "Image": "", "WorkingDir": "",
+        "MacAddress": "", "StopSignal": "", "AttachStdin": False, "AttachStdout": False,
+        "AttachStderr": False, "Tty": False, "OpenStdin": False, "StdinOnce": False,
+        "ArgsEscaped": False, "NetworkDisabled": False, "Env": None, "Cmd": None,
+        "Entrypoint": None, "Volumes": None, "OnBuild": None, "Labels": None,
+        "ExposedPorts": None, "Shell": None, "Healthcheck": None, "StopTimeout": None,
+    }
+    return {key: value for key, value in config.items()
+            if key not in defaults or
+            not (value == defaults[key] or defaults[key] is None and value in ([], {}))}
+
+
 def archive_custody(path, inspect, prefix):
     """Verify saved config and uncompressed layers without extracting tar paths."""
     regular(path)
@@ -93,7 +109,7 @@ def archive_custody(path, inspect, prefix):
         config = json.loads(config_bytes)
         require(digest(config_bytes) == inspect["Id"], "Saved config/image ID mismatch")
         require(config["rootfs"]["diff_ids"] == inspect["RootFS"]["Layers"], "RootFS mismatch")
-        require(config["config"] == inspect["Config"], "Image Config mismatch")
+        require(normalized_config(config["config"]) == normalized_config(inspect["Config"]), "Image Config mismatch")
         require(config["os"] == "linux" and config["architecture"] == "amd64", "Wrong image platform")
         require(len(entry["Layers"]) == len(config["rootfs"]["diff_ids"]), "Layer count mismatch")
         layers = []
@@ -140,10 +156,13 @@ def main():
             "docker": run("docker", "version").decode(),
             "buildx": run("docker", "buildx", "version").decode(),
             "builder": run("docker", "buildx", "inspect", "default").decode(),
+            "image_store": json.loads(run("docker", "info", "--format", "{{json .DriverStatus}}")),
             "runner_image": os.environ.get("ImageVersion", "unreported"),
             "runner_cpus": os.cpu_count(),
         }
         write_json("versions.json", versions)
+        require("io.containerd.snapshotter.v1" not in str(versions["image_store"]),
+                "Unsupported containerd image store; requires classic config-digest image IDs")
         raw = run("docker", "buildx", "imagetools", "inspect", "--raw", BASE)
         # Some buildx versions append a display newline. Preserve only bytes matching the pin.
         if digest(raw) != BASE.split("@")[1] and raw.endswith(b"\n"):
