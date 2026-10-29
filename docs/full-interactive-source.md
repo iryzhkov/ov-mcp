@@ -1,5 +1,7 @@
 # Full interactive HTTP source preparation
 
+The manual `HTTP image artifact` workflow builds the unchanged Dockerfile on `ubuntu-24.04` from the workflow run's exact commit, using the reviewed Python 3.13 base digest and only the ten hash-pinned context files. Its run-ID/commit artifact contains a loadable `image.tar`, SHA256, source/tree/input hashes, base manifest bytes and descriptors, verified saved config/layer custody, image ID/Config/RootFS, build metadata, versions and command statuses; it expires after seven days and must total less than 400 MiB. The script uses the runner's installed Docker/BuildKit with `buildx --load`, without per-build resource flags, and records tool/runner versions; the 15-minute hosted job and runner bounds do not satisfy or replace the separate homelab 2 CPU/2 GiB gate. No output distribution digest is claimed without distribution manifest bytes, and this artifact workflow does not deploy, import, start the application or establish live acceptance. Hosted build, upload and actual size acceptance remain pending until the root publishes and manually dispatches the workflow.
+
 This branch is not a deployed full-parity release. The live bounded reader remains unchanged. Mutations, safe orphan repair, qualified backend artifacts and four native host/provider checks are still required before replacing stdio.
 
 The default semantic profile remains disabled. The existing `namespace-directories-v1` profile keeps its exact namespace-admission and scope-assertion behavior.
