@@ -49,6 +49,8 @@ class TypedBackend:
         self.contract = CONTRACT
         self.fault = ""
         self.hits = []
+        self.search_rows: list[dict] | None = None
+        self.on_search = None
         self.stat_fault = {}
         self.list_poison = None
         self.on_contract = None
@@ -95,9 +97,10 @@ class TypedBackend:
             candidates = self.hits + [B + "/foreign.md", "viking://user/private.md"]
             hits = [name for name in candidates if any(name == root or name.startswith(root + "/")
                                                        for root in body["target_uri"])]
-            return 200, ok({"memories": [], "skills": [], "resources": [
-                {"uri": name, "context_type": "resource", "level": 2, "score": .8,
-                 "abstract": "ignored", "source": "SECRET"} for name in hits]})
+            rows = [search_hit(name) for name in hits] if self.search_rows is None else self.search_rows
+            if self.on_search is not None:
+                self.on_search()
+            return 200, ok({"memories": [], "skills": [], "resources": rows})
         assert method == "POST", (method, path)
         if self.fault == "timeout":
             raise httpx.ReadTimeout("SECRET transport")
@@ -219,6 +222,8 @@ async def direct(engine, *, roots=(A,), actions=("read", "write", "remove", "mai
         engine.on_contract = lambda: None
         if engine.fault == "expire_on_contract":
             engine.on_contract = lambda: object.__setattr__(principal, "expires", int(time.time()) - 1)
+        if engine.fault == "expire_after_search":
+            engine.on_search = lambda: object.__setattr__(principal, "expires", int(time.time()) - 1)
         if engine.fault == "expire_after_commit":
             engine.on_effect = lambda: object.__setattr__(principal, "expires", int(time.time()) - 1)
         async def invoke(name, **arguments):
@@ -354,6 +359,190 @@ async def test_audit_scope_before_rank_exact_absence_only_and_no_error_as_absenc
     async with direct(engine) as invoke:
         _, failed = await invoke("memory_index_audit", query="note", scope=A, fix=True)
     assert failed and engine.effects == []
+
+def search_hit(uri, level=2, **changes):
+    """Injected typed rows, including source-supported L0/L1 sidecar shapes."""
+    return {
+        "uri": uri,
+        "context_type": "resource",
+        "level": level,
+        "score": 0.8,
+        "abstract": "ignored",
+        "source": "SECRET",
+        **changes,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fix", [False, True])
+@pytest.mark.parametrize("limit", [1, 2, 40])
+async def test_sdk_audit_document_candidates_omit_only_validated_metadata(sdk, fix, limit):
+    sessions, engine = sdk
+    abstract, overview, missing = A + "/.abstract.md", DOC + "/.overview.md", A + "/gone.md"
+    engine.search_rows = [
+        search_hit(abstract, 0),
+        search_hit(DOC),
+        search_hit(abstract, 0),
+        search_hit(DOC),
+        search_hit(missing),
+        search_hit(overview, 1),
+    ]
+    claims = {"scope": "ov.read ov.maintain", "ov_actions": ["read", "maintain"]} if fix else {}
+    async with sessions(**claims) as session:
+        response, answer = await call(
+            session, "memory_index_audit", query="note", scope=A, limit=limit, fix=fix
+        )
+    assert not response.is_error, answer
+    assert answer == {
+        "checked": min(limit, 2),
+        "present": [DOC],
+        "absent": [] if limit == 1 else [missing],
+        "pruned_count": int(fix and limit > 1),
+        "metadata_omitted": 3,
+        "candidate_kind": "document",
+        "complete": False,
+        "descendant_orphan_sweep": False,
+    }
+    stats = [row[2]["uri"] for row in engine.calls if row[1] == "/fs/stat"]
+    assert abstract not in stats and overview not in stats
+    assert engine.effects == ([("/fs/resources-only/prune-index", missing)] if fix and limit > 1 else [])
+    assert "SECRET" not in json.dumps(answer)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fix", [False, True])
+@pytest.mark.parametrize("count", [0, 100, 101])
+async def test_audit_metadata_omission_count_is_bounded_validated_batch(fix, count):
+    engine = TypedBackend()
+    engine.search_rows = [
+        search_hit(A + "/.abstract.md", 0) if i % 2 == 0 else search_hit(DOC + "/.overview.md", 1)
+        for i in range(count)
+    ]
+    async with direct(engine) as invoke:
+        answer, failed = await invoke("memory_index_audit", query="note", scope=A, fix=fix)
+    assert failed == (count > 100)
+    if not failed:
+        assert answer["metadata_omitted"] == count
+        assert answer["candidate_kind"] == "document" and answer["complete"] is False
+        assert answer["checked"] == answer["pruned_count"] == 0
+        assert answer["present"] == answer["absent"] == []
+    assert not engine.effects
+    assert [row[2]["uri"] for row in engine.calls if row[1] == "/fs/stat"] == [A]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fix", [False, True])
+@pytest.mark.parametrize("beyond_limit", [False, True])
+@pytest.mark.parametrize("roots", [(A,), (A, B)])
+@pytest.mark.parametrize(
+    "poison",
+    [
+        search_hit(A + "/bad/../.abstract.md", 0),
+        search_hit(B + "/.abstract.md", 0),
+        search_hit("viking://user/private/.overview.md", 1),
+        search_hit(A + "/.abstract.md", 0, score="bad"),
+        search_hit(A + "/.overview.md", 1, context_type="memory"),
+        search_hit(A + "/.abstract.md", True),
+    ],
+)
+async def test_audit_validates_entire_batch_before_metadata_omission(fix, beyond_limit, roots, poison):
+    engine = TypedBackend()
+    valid = [search_hit(A + "/gone.md"), search_hit(A + "/.overview.md", 1)]
+    engine.search_rows = valid + [poison] if beyond_limit else [poison] + valid
+    async with direct(engine, roots=roots) as invoke:
+        answer, failed = await invoke("memory_index_audit", query="note", scope=A, limit=1, fix=fix)
+    assert failed and answer["outcome"] == "not_started"
+    assert not engine.effects
+    assert [row[2]["uri"] for row in engine.calls if row[1] == "/fs/stat"] == [A]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fix", [False, True])
+@pytest.mark.parametrize(
+    "uri,level",
+    [
+        (A + "/.abstract.md", 1),
+        (A + "/.abstract.md", 2),
+        (A + "/.overview.md", 0),
+        (A + "/.overview.md", 2),
+        (A + "/.abstract.md/child.md", 0),
+        (A + "/.overview.md/child.md", 1),
+        (A + "/.abstract.md/.overview.md", 1),
+    ],
+)
+async def test_audit_unexpected_metadata_shapes_still_refuse(fix, uri, level):
+    engine = TypedBackend()
+    engine.search_rows = [search_hit(A + "/gone.md"), search_hit(uri, level)]
+    async with direct(engine) as invoke:
+        answer, failed = await invoke("memory_index_audit", query="note", scope=A, fix=fix)
+    assert failed and answer["outcome"] == "not_started" and not engine.effects
+    assert uri not in [row[2]["uri"] for row in engine.calls if row[1] == "/fs/stat"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fix", [False, True])
+@pytest.mark.parametrize("status,code", [(403, "PERMISSION_DENIED"), (500, "INTERNAL"), (404, "UNKNOWN")])
+async def test_audit_metadata_does_not_hide_later_stat_failure(fix, status, code):
+    engine = TypedBackend()
+    broken = A + "/broken.md"
+    engine.search_rows = [search_hit(A + "/gone.md"), search_hit(A + "/.abstract.md", 0), search_hit(broken)]
+    engine.stat_fault[broken] = (status, error(code))
+    async with direct(engine) as invoke:
+        answer, failed = await invoke("memory_index_audit", query="note", scope=A, fix=fix)
+    assert failed and answer["outcome"] == "not_started" and not engine.effects
+    assert broken in [row[2]["uri"] for row in engine.calls if row[1] == "/fs/stat"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fix", [False, True])
+@pytest.mark.parametrize("boundary", ["expired", "after_search", "budget", "read_only"])
+async def test_audit_metadata_preserves_expiry_budget_and_actions(fix, boundary):
+    engine = TypedBackend()
+    engine.search_rows = [search_hit(A + "/.abstract.md", 0), search_hit(A + "/gone.md")]
+    if boundary == "after_search":
+        engine.fault = "expire_after_search"
+    expires = int(time.time()) - 1 if boundary == "expired" else None
+    actions = ("read",) if boundary == "read_only" else ("read", "maintain")
+    async with direct(
+        engine, expires=expires, actions=actions, requests=127 if boundary == "budget" else 0
+    ) as invoke:
+        answer, failed = await invoke("memory_index_audit", query="note", scope=A, fix=fix)
+    assert failed == (boundary != "read_only" or fix)
+    if failed:
+        assert answer["outcome"] == "not_started"
+    assert not engine.effects
+    if boundary == "expired" or boundary == "read_only" and fix:
+        assert not engine.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["memory_index_prune", "memory_rm"])
+@pytest.mark.parametrize("leaf", [".abstract.md", ".overview.md"])
+async def test_direct_metadata_prune_and_remove_still_refuse(tool, leaf):
+    engine = TypedBackend()
+    async with direct(engine) as invoke:
+        answer, failed = await invoke(tool, uri=A + "/" + leaf)
+    assert failed and answer["outcome"] == "not_started"
+    assert not engine.calls and not engine.effects
+
+
+@pytest.mark.asyncio
+async def test_audit_metadata_preserves_partial_prune_unknown():
+    engine = TypedBackend()
+    first, second = A + "/gone1.md", A + "/gone2.md"
+    engine.search_rows = [search_hit(first), search_hit(A + "/.abstract.md", 0), search_hit(second)]
+    original = engine.reply
+
+    def raced(method, path, params, body):
+        if path == "/fs/resources-only/prune-index" and engine.effects:
+            engine.files[body["uri"]] = b"concurrent writer"
+        return original(method, path, params, body)
+
+    engine.reply = raced
+    async with direct(engine) as invoke:
+        answer, failed = await invoke("memory_index_audit", query="note", scope=A, fix=True)
+    assert failed and answer["outcome"] == "unknown" and answer["retry_safe"] is False
+    assert engine.effects == [("/fs/resources-only/prune-index", first)]
 
 
 @pytest.mark.asyncio

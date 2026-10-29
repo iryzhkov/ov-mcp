@@ -43,7 +43,8 @@ MUTATION_SPECS = {
                        {"uri": URI, "force": BOOL}, ["uri"]),
     "memory_index_prune": ("Prune only the exact authorized absent URI. No descendant-orphan sweep.",
                            {"uri": URI, "dry_run": BOOL}, ["uri"]),
-    "memory_index_audit": ("Bounded scoped semantic hits and exact existence validation. fix prunes proven absent URIs only.",
+    "memory_index_audit": ("Bounded scoped document candidates and exact existence validation. "
+                           "Reports omitted L0/L1 metadata hits. fix prunes proven absent documents only.",
                            {"query": {"type": "string", "minLength": 1, "maxLength": 1024},
                             "scope": URI, "limit": {"type": "integer", "minimum": 1, "maximum": 40},
                             "fix": BOOL}, ["query"]),
@@ -431,7 +432,18 @@ class Mutations:
         for root in roots:
             self.p.require_action("maintain" if a.get("fix", False) else "read", root)
         hits = await self.backend.semantic("search", a["query"], roots)
-        uris = list(dict.fromkeys(hit["uri"] for hit in hits))[:a.get("limit", 40)]
+        # semantic() validates the entire bounded batch before any omission.
+        documents, metadata_omitted = [], 0
+        for hit in hits:
+            parts = hit["uri"].split("/")
+            if (hit["level"], parts[-1]) in {(0, ".abstract.md"), (1, ".overview.md")} and not any(
+                part in {".abstract.md", ".overview.md"} for part in parts[:-1]
+            ):
+                metadata_omitted += 1
+            else:
+                # Unexpected metadata shapes still reach the existing authorizer.
+                documents.append(hit["uri"])
+        uris = list(dict.fromkeys(documents))[: a.get("limit", 40)]
         # Finish every check before the first prune. Failure is never absence.
         absent, present = [], []
         for uri in uris:
@@ -444,6 +456,7 @@ class Mutations:
                 await self.remove({"uri": uri}, prune=True)
                 pruned.append(uri)
         return {"checked": len(uris), "present": present, "absent": absent, "pruned_count": len(pruned),
+                "candidate_kind": "document", "metadata_omitted": metadata_omitted,
                 "complete": False, "descendant_orphan_sweep": False}
 
     async def run(self, name, a):
