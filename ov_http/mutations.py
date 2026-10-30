@@ -16,6 +16,9 @@ from .reader import Backend, BudgetExhausted, DOC_EXTS
 PROFILE = "resources-document-mutations-v1"
 CONTRACT_PATH = "/fs/resources-only/mutation-contract"
 CONTRACT = {"contract": "resources-document-mutations", "version": 1}
+LONG_MUTATION_SECONDS = 70
+LONG_MUTATION_NAMES = frozenset({"memory_mv", "memory_reindex"})
+LONG_MUTATION_ENDPOINTS = frozenset({"/fs/mv", "/content/reindex"})
 UNKNOWN = {"error": "Outcome unknown after dispatch. Do not retry automatically.",
            "outcome": "unknown", "retry_safe": False}
 URI = {"type": "string", "minLength": 1, "maxLength": 1024}
@@ -90,6 +93,10 @@ class Mutations:
         b.requests += 1
         if effect:
             self.state["dispatched"] = True
+            if endpoint in LONG_MUTATION_ENDPOINTS:
+                # A measured parent-refresh move took 36.5 seconds. Keep the
+                # observation finite and below the authority-bound outer cap.
+                kwargs["timeout"] = httpx.Timeout(60, connect=5, pool=5)
         async with b.client.stream(method, b.config.backend_url + endpoint, **kwargs) as response:
             if response.headers.get("content-encoding", "identity") != "identity":
                 raise Refused()
@@ -109,6 +116,13 @@ class Mutations:
         if not isinstance(error, dict) or value.get("status") != "error":
             raise Refused()
         code = error.get("code")
+        details = error.get("details")
+        if (not effect and status == 409 and code == "CONFLICT"
+                and isinstance(details, dict) and details.get("conflict_type") == "path_busy"):
+            # This observation did not dispatch a mutation. Never expose the
+            # upstream message, path or lock owner, and never retry here.
+            raise OperationError({"error": "Resource is busy; no mutation dispatched.",
+                                  "outcome": "not_started", "busy": True, "retry_safe": False})
         if effect and error_projection is not None:
             error_projection(status, error)
         if not effect and status == 404 and code == "NOT_FOUND":
@@ -489,7 +503,8 @@ class Mutations:
 async def call_mutation(backend, name, arguments, state):
     operation = Mutations(backend, state)
     try:
-        remaining = min(20, backend.principal.expires - time.time())
+        cap = LONG_MUTATION_SECONDS if name in LONG_MUTATION_NAMES else 20
+        remaining = min(cap, backend.principal.expires - time.time())
         if remaining <= 0:
             raise Refused()
         async with asyncio.timeout(remaining):
