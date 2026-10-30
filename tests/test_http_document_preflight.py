@@ -128,7 +128,7 @@ async def test_sdk_dry_run_schema_and_default_write_unchanged(sdk_documents):
     claims = {"ov_actions": list(ACTIONS), "scope": "ov.read ov.write ov.maintain ov.remove"}
     async with session(**claims) as client:
         spec = next(t for t in (await client.list_tools()).tools if t.name == "memory_write")
-        assert spec.inputSchema["properties"]["dry_run"] == {"type": "boolean"}
+        assert spec.input_schema["properties"]["dry_run"] == {"type": "boolean"}
         response, answer = await call(client, "memory_write", **args(dry_run=True))
         assert not response.is_error and answer["preflight_passed"]
         assert not engine.effects
