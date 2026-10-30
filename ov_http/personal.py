@@ -21,7 +21,7 @@ HASH = {"type": "string", "pattern": "^[a-f0-9]{64}$"}
 PERSONAL_SPECS = {
     "personal_memory_browse": ("List direct children of an owned memory directory; bounded incomplete batch.",
                                {"uri": URI, "limit": LIMIT}, []),
-    "personal_memory_read": ("Read explicit owned memory content and its byte hash.",
+    "personal_memory_read": ("Read visible owned memory content; return a replacement hash only when visible and stored bytes match.",
                              {"uri": URI}, ["uri"]),
     "personal_memory_find": ("Find only within explicit owned memory targets; bounded incomplete batch.",
                              {"query": {**TEXT, "minLength": 1, "maxLength": 1024},
@@ -220,7 +220,13 @@ class Personal:
             text = await self.request("memory.read", "GET", "/content/read", params={"uri": uri})
             if not isinstance(text, str) or len(text.encode()) > 32768:
                 raise Refused()
-            return {"uri": uri, "content": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}
+            raw = await self.request("memory.read", "GET", "/content/read",
+                                     params={"uri": uri, "raw": True})
+            if not isinstance(raw, str) or len(raw.encode()) > 32768:
+                raise Refused()
+            replaceable = raw == text
+            return {"uri": uri, "content": text, "replaceable": replaceable,
+                    "sha256": hashlib.sha256(text.encode()).hexdigest() if replaceable else None}
         if name == "personal_memory_find":
             targets = a.get("targets", [self.memory_root])
             for target in targets:

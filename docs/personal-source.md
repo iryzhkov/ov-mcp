@@ -25,7 +25,7 @@ Actions may be reduced, but must be unique and follow that order. Each action re
 Tools and exact arguments:
 
 - `personal_memory_browse(uri?, limit?)`: immediate children; omitted URI means own memories root.
-- `personal_memory_read(uri)`: explicit text memory file, content and SHA256.
+- `personal_memory_read(uri)`: visible text memory content. Returns `replaceable:true` and a stored-byte SHA256 only when a separate raw read equals the visible content. Otherwise `sha256:null` and `replaceable:false`; raw content is never returned. Extracted metadata or privacy transformations therefore cannot be silently discarded by a read-to-replace workflow.
 - `personal_memory_find(query, targets?, limit?)`: omitted targets become exactly own memories root. Empty, mixed or foreign targets refuse before dispatch.
 - `personal_memory_create(uri, content)`: one native batch operation with `expected_absent:true`.
 - `personal_memory_replace(uri, content, expected_sha256)`: one native batch operation with a byte-hash precondition.

@@ -45,6 +45,7 @@ class Engine:
     def __init__(self):
         self.calls = []
         self.files = {DOC: "old"}
+        self.raw_files = {}
         self.poison = None
         self.fault = False
         self.append_ack = {}
@@ -79,7 +80,8 @@ class Engine:
         if path == "/fs/ls":
             result = [self.poison or DOC]
         elif path == "/content/read":
-            result = self.files[uri]
+            result = (self.raw_files.get(uri, self.files[uri])
+                      if request.query_params.get("raw") == "true" else self.files[uri])
         elif path == "/search/find":
             assert body["target_uri"] and all(t.startswith(ROOT) for t in body["target_uri"])
             result = {"memories": [{"uri": self.poison or DOC}], "resources": [], "skills": []}
@@ -178,6 +180,75 @@ async def test_sdk_positive_and_resources_catalog_preservation(personal):
     async with sessions(**claims(sub="laptop")) as s:
         r, v = await call(s, "personal_session_read", session_id="sibling")
         assert not r.is_error and v["session_id"] == "sibling"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["old\n<!-- MEMORY_FIELDS: hidden metadata -->", "private unsanitized secret"])
+async def test_visible_memory_does_not_offer_raw_replacement_hash(personal, raw):
+    sessions, e, _, _ = personal
+    e.raw_files[DOC] = raw
+    async with sessions(**claims()) as s:
+        before = len(e.calls)
+        r, value = await call(s, "personal_memory_read", uri=DOC)
+        assert not r.is_error
+        assert value["content"] == "old"
+        assert value["sha256"] is None and value["replaceable"] is False
+        assert raw not in str(value)
+        assert len(e.calls) == before + 2
+        assert e.calls[-1][2] == {"uri": DOC, "raw": "true"}
+        before = len(e.calls)
+        r, _ = await call(s, "personal_memory_replace", uri=DOC, content="changed",
+                          expected_sha256=value["sha256"])
+        assert r.is_error and len(e.calls) == before
+        assert e.files[DOC] == "old" and e.raw_files[DOC] == raw
+
+
+@pytest.mark.asyncio
+async def test_matching_memory_read_hash_replaces_stored_bytes(personal):
+    sessions, e, _, _ = personal
+    async with sessions(**claims()) as s:
+        r, value = await call(s, "personal_memory_read", uri=DOC)
+        assert not r.is_error and value["replaceable"] is True
+        assert value["sha256"] == hashlib.sha256(b"old").hexdigest()
+        r, result = await call(s, "personal_memory_replace", uri=DOC, content="changed",
+                               expected_sha256=value["sha256"])
+        assert not r.is_error and result["outcome"] == "committed"
+        assert e.files[DOC] == "changed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["error", "malformed", "oversize", "expiry_on_raw",
+                                  "budget_after_visible", "reduced_after_visible"])
+async def test_raw_comparison_failures_never_project_raw(fault):
+    c = cfg()
+    p = Principal("pc", ("viking://resources",), int(time.time()) + 60, "test",
+                  personal_account="default", personal_user="default", personal_actions=PERSONAL_ACTIONS)
+    calls = []
+    secret = "RAW_COMPARISON_ONLY_SECRET"
+    async def handler(request):
+        calls.append(request)
+        assert request.method == "GET" and request.url.params["uri"] == DOC
+        if len(calls) == 1:
+            assert "raw" not in request.url.params
+            if fault == "budget_after_visible":
+                b.requests = 128
+            if fault == "reduced_after_visible":
+                object.__setattr__(p, "personal_actions", ())
+            return httpx.Response(200, json={"status": "ok", "result": "visible"})
+        assert request.url.params["raw"] == "true"
+        if fault == "error":
+            return httpx.Response(500, json={"status": "error", "error": {"message": secret}})
+        if fault == "expiry_on_raw":
+            object.__setattr__(p, "expires", int(time.time()) - 1)
+        raw = {"content": secret} if fault == "malformed" else (
+            secret + "x" * 32769 if fault == "oversize" else secret)
+        return httpx.Response(200, json={"status": "ok", "result": raw})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        b = Backend(c, p, client)
+        value, failed = await call_personal(b, "personal_memory_read", {"uri": DOC}, {})
+        assert failed and value["outcome"] == "not_started"
+        assert secret not in json.dumps(value) and "sha256" not in value
+        assert len(calls) == (1 if fault in ("budget_after_visible", "reduced_after_visible") else 2)
 
 
 @pytest.mark.asyncio
