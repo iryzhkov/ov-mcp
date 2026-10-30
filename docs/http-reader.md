@@ -4,6 +4,22 @@ This source slice adds an independent stateless Streamable HTTP MCP service.
 The broad interactive stdio entrypoint remains `server.py`; the HTTP service never
 imports it, its credential lookup, instrumentation or mutation tools.
 
+## Document-write preflight
+
+With the mutation profile enabled, `memory_write(dry_run=true)` performs the
+default document path's guarded read-only preflight. It requires the same signed
+actions, ancestors, parent and overwrite checks as publication, but never
+dispatches a mutation. The explicit file-deferred-v1 path rejects this option.
+No revision or backup name is reserved; a later real write observes state again.
+
+A successful dry run returns `outcome=not_started`, `preflight_passed=true`,
+`dispatched=false`, and `preflight.stage=ready`. Failure returns the ordinary
+safe error plus a fixed preflight stage and category. Categories can identify
+allowlisted document-node protocol failures without exposing backend messages,
+private paths, details or credentials. Unknown errors remain unavailable.
+This is diagnostic evidence, not permission to retry or proof of indexing.
+Default writes and their commit/unknown handling are unchanged.
+
 ## Runtime interface
 
 Use Python 3.13 and a dedicated environment with `requirements-http.lock`.
