@@ -11,7 +11,7 @@ from .mutations import Mutations, OperationError, UNKNOWN
 from .reader import BudgetExhausted
 
 APPEND_MODE = "existing_only_no_auto_commit"
-PERSONAL_BACKEND_REVISION = "ffcf2972d73d5d54e01924da1ba04d72fb69d41b"
+PERSONAL_BACKEND_REVISION = "7f3faf6982f81116d6626bc7091f87f786a309c7"
 PERSONAL_ACTIONS = ("memory.read", "memory.write", "session.read", "session.create", "session.append")
 ID = {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}
 URI = {"type": "string", "minLength": 1, "maxLength": 1024}

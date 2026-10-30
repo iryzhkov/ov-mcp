@@ -27,7 +27,7 @@ from test_http_mutations import config
 ROOT = "viking://user/default/memories"
 DOC = ROOT + "/preferences/note.md"
 SESSIONS = "viking://user/default/sessions"
-PIN = "ffcf2972d73d5d54e01924da1ba04d72fb69d41b"
+PIN = "7f3faf6982f81116d6626bc7091f87f786a309c7"
 
 
 def cfg():
