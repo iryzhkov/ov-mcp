@@ -15,6 +15,7 @@ from starlette.routing import Route
 
 from .auth import Principal, Refused, Verifier
 from .config import Config, RESOURCES_PROFILE
+from .personal import PERSONAL_ACTIONS, PERSONAL_SPECS, PERSONAL_READ_ONLY, call_personal
 from .reader import Backend, BudgetExhausted, Reader, SAFE_ERROR
 from .mutations import LONG_MUTATION_SECONDS, MUTATION_SPECS, READ_ONLY, UNKNOWN, call_mutation
 
@@ -56,7 +57,7 @@ SPECS = {
 
 
 def schema(name, profile="disabled"):
-    _, properties, required = (SPECS if name in SPECS else MUTATION_SPECS)[name]
+    _, properties, required = {**SPECS, **MUTATION_SPECS, **PERSONAL_SPECS}[name]
     if profile == RESOURCES_PROFILE and name in ("memory_ls", "memory_tree"):
         properties = {**properties, "offset": {"type": "integer", "minimum": 0, "maximum": 100000,
                       "description": "Visible-node offset. Reauthorized each call; best effort under concurrent edits. Page cap 40. Multiple grants require an explicit directory URI."}}
@@ -151,12 +152,15 @@ def create_app(config: Config, *, jwks_ssl_context: ssl.SSLContext | None = None
 
     catalog = {**SPECS, **MUTATION_SPECS} if config.mutation_profile != "disabled" else SPECS
 
+    if config.personal_profile != "disabled":
+        catalog = {**catalog, **PERSONAL_SPECS}
+
     async def list_tools(ctx, params):
         return ListToolsResult(tools=[
             Tool(name=name, description=description, input_schema=schema(name, config.semantic_profile),
-                 annotations=ToolAnnotations(read_only_hint=name in SPECS or name in READ_ONLY,
-                                             destructive_hint=name not in SPECS and name not in READ_ONLY,
-                                             idempotent_hint=name in SPECS or name in READ_ONLY,
+                 annotations=ToolAnnotations(read_only_hint=name in SPECS or name in READ_ONLY or name in PERSONAL_READ_ONLY,
+                                             destructive_hint=name not in SPECS and name not in READ_ONLY and name not in PERSONAL_READ_ONLY,
+                                             idempotent_hint=name in SPECS or name in READ_ONLY or name in PERSONAL_READ_ONLY,
                                              open_world_hint=False))
             for name, (description, _, _) in catalog.items()
         ])
@@ -171,6 +175,10 @@ def create_app(config: Config, *, jwks_ssl_context: ssl.SSLContext | None = None
             principal = request.scope.get("ov.principal") if request is not None else None
             if not isinstance(principal, Principal):
                 raise Refused()
+            if name in PERSONAL_SPECS:
+                backend = Backend(config, principal, backend_client)
+                value, error = await call_personal(backend, name, arguments, request.scope["ov.operation"])
+                return result(value, error)
             # Verify every supplied URI before any upstream query, even disabled tools.
             for key in ("uri", "scope"):
                 if key in arguments:
@@ -236,7 +244,9 @@ def create_app(config: Config, *, jwks_ssl_context: ssl.SSLContext | None = None
     async def metadata(request):
         return JSONResponse({"resource": config.resource, "authorization_servers": [config.issuer],
                              "scopes_supported": (["ov.read", "ov.write", "ov.remove", "ov.maintain"]
-                                                  if config.mutation_profile != "disabled" else ["ov.read"]),
+                                                  if config.mutation_profile != "disabled" else ["ov.read"])
+                                                  + (["ov.personal." + a for a in PERSONAL_ACTIONS]
+                                                     if config.personal_profile != "disabled" else []),
                              "bearer_methods_supported": ["header"]})
 
     sdk_app = server.streamable_http_app(

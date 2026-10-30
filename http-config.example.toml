@@ -15,3 +15,7 @@ semantic_profile = "disabled"
 # semantic_backend_revision = "68e66ec8998957e1af3cae8a661947fe77cd9578"
 # namespace_roots = ["viking://resources/namespaceA"]
 # Operator invariant: these actual namespace roots remain directories during service lifetime.
+
+# Personal memory/session tools remain default-off. Exact protected owner/subject
+# configuration and signed claim contract: docs/personal-source.md.
+personal_profile = "disabled"

@@ -60,6 +60,11 @@ class Config:
     semantic_backend_revision: str = ""
     namespace_roots: tuple[str, ...] = ()
     mutation_profile: str = "disabled"
+    personal_profile: str = "disabled"
+    personal_account: str = ""
+    personal_user: str = ""
+    personal_subjects: tuple[str, ...] = ()
+    personal_backend_revision: str = ""
 
     def __post_init__(self):
         for value in (self.resource, self.issuer, self.jwks_url):
@@ -81,6 +86,23 @@ class Config:
             raise ValueError("unknown mutation profile")
         if self.mutation_profile != "disabled" and self.semantic_profile != RESOURCES_PROFILE:
             raise ValueError("mutation profile requires the resources read profile")
+        if self.personal_profile not in ("disabled", "shared-owner-v1"):
+            raise ValueError("unknown personal profile")
+        if self.personal_profile == "disabled":
+            if (self.personal_account or self.personal_user or self.personal_subjects
+                    or self.personal_backend_revision):
+                raise ValueError("disabled personal profile cannot bind an owner")
+        else:
+            if (not all(isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", v)
+                        for v in (self.personal_account, self.personal_user))
+                    or not isinstance(self.personal_subjects, (list, tuple))
+                    or not 1 <= len(self.personal_subjects) <= 16
+                    or any(not isinstance(s, str) or not 1 <= len(s) <= 256
+                           or any(ord(c) < 33 for c in s) for s in self.personal_subjects)
+                    or len(set(self.personal_subjects)) != len(self.personal_subjects)
+                    or self.personal_backend_revision != "7adf8b5fbcaa3293ef2a0b0ed44f864477401c39"):
+                raise ValueError("personal profile requires exact owner, subjects and backend pin")
+        object.__setattr__(self, "personal_subjects", tuple(self.personal_subjects))
         roots = self.namespace_roots
         if not isinstance(roots, (list, tuple)) or len(roots) > 16:
             raise ValueError("invalid namespace admission")
