@@ -16,7 +16,7 @@ from starlette.routing import Route
 from .auth import Principal, Refused, Verifier
 from .config import Config, RESOURCES_PROFILE
 from .reader import Backend, BudgetExhausted, Reader, SAFE_ERROR
-from .mutations import MUTATION_SPECS, READ_ONLY, UNKNOWN, call_mutation
+from .mutations import LONG_MUTATION_SECONDS, MUTATION_SPECS, READ_ONLY, UNKNOWN, call_mutation
 
 STRING = {"type": "string", "minLength": 1, "maxLength": 1024}
 URI_ARG = {**STRING, "description": "Canonical viking://resources/... URI within this token's grants."}
@@ -120,7 +120,7 @@ class SecurityGate:
         request_task = asyncio.create_task(self.app(scope, messages.get, send))
         disconnect_task = asyncio.create_task(relay())
         try:
-            done, _ = await asyncio.wait({request_task, disconnect_task}, timeout=25,
+            done, _ = await asyncio.wait({request_task, disconnect_task}, timeout=LONG_MUTATION_SECONDS + 5,
                                          return_when=asyncio.FIRST_COMPLETED)
             if not done:
                 timeout_value = UNKNOWN if scope["ov.operation"].get("dispatched") else {"error": "Request timeout."}

@@ -328,13 +328,17 @@ class DocumentWriter:
         from .mutations import OperationError, unsupported
 
         self.m.state["document_write"] = True
+        if "expected_sha256" in a:
+            raise OperationError({
+                "error": "Default document writes use observed node CAS; expected_sha256 requires storage=file-deferred-v1.",
+                "outcome": "not_started", "supported": False,
+            })
         to, filename = a["to"], a["filename"]
         if (
             not isinstance(filename, str)
             or "/" in filename
             or filename
             in {".watch_tasks.json", ".watch_tasks.json.bak", ".watch_tasks.json.tmp"}
-            or "expected_sha256" in a
         ):
             raise Refused()
         self.m.authorize("write", to, to + "/" + filename, strict=True)
