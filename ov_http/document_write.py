@@ -138,6 +138,7 @@ class DocumentWriter:
         return node(value["result"]["node"])
 
     def project_observation_error(self, status, error):
+        self.p.require_action("read", self.target)
         # Read-only diagnostics use exact allowlisted protocol text, never details.
         categories = {
             "Document URI must be canonical resources content": "invalid_document_uri",

@@ -39,6 +39,9 @@ async def test_dry_run_prepares_without_any_mutation(kind):
     ("Document URI must be canonical resources content", "invalid_document_uri"),
     ("Directory fragment controls are unsupported", "directory_fragment_controls"),
     ("Resource document has residual index state", "residual_index_state"),
+    ("Document context inventory incomplete", "context_inventory_incomplete"),
+    ("Document context limit exceeded", "context_limit"),
+    ("Document aliases are unsupported", "document_alias"),
     (SECRET, "unavailable"),
 ])
 async def test_node_refusal_projects_only_closed_category(message, category):
@@ -53,6 +56,27 @@ async def test_node_refusal_projects_only_closed_category(message, category):
     assert answer["preflight"] == {"stage": "target_node", "category": category}
     assert SECRET not in json.dumps(answer)
     assert all(c[0] == "GET" for c in engine.calls)
+    assert not engine.effects
+
+
+@pytest.mark.asyncio
+async def test_inflight_expiry_suppresses_backend_category():
+    class Expiring(Documents):
+        def reply(self, method, path, params, body):
+            if path == NODE_PATH:
+                object.__setattr__(principal, "expires", int(time.time()) - 1)
+                return 400, {"status": "error", "error": {
+                    "code": "INVALID_ARGUMENT",
+                    "message": "Document URI must be canonical resources content",
+                    "details": {"uri": SECRET},
+                }}
+            return super().reply(method, path, params, body)
+    engine = Expiring()
+    async with invoke(engine) as (run, principal, _):
+        answer, failed = await run(**args(dry_run=True))
+    assert failed and answer["preflight"] == {
+        "stage": "target_node", "category": "unavailable"}
+    assert SECRET not in json.dumps(answer)
     assert not engine.effects
 
 
