@@ -34,15 +34,14 @@ async def test_sdk_move_observes_measured_slow_parent_refresh(sdk, monkeypatch):
 
     monkeypatch.setattr(httpx2.AsyncClient, "__init__", long_client)
     sessions, engine = sdk
-    reply = engine.reply
 
-    def delayed(method, path, params, body):
-        if method == "POST" and path == "/fs/mv":
-            # Real backend HTTP latency, matching the 36.5-second incident.
-            time.sleep(36.5)
-        return reply(method, path, params, body)
+    async def delayed(request):
+        if request.method == "POST" and request.url.path.endswith("/fs/mv"):
+            # Nonblocking delay: adapter, client and cancellation deadlines
+            # continue running on the shared event loop throughout the delay.
+            await asyncio.sleep(36.5)
 
-    engine.reply = delayed
+    engine.before_reply = delayed
     async with sessions(**FULL) as session:
         response, answer = await call(
             session,
@@ -102,3 +101,25 @@ async def test_default_hash_input_explains_representation_contract_before_io():
     assert "observed node CAS" in answer["error"]
     assert "file-deferred-v1" in answer["error"]
     assert not engine.calls
+
+
+@pytest.mark.asyncio
+async def test_post_commit_busy_observation_preserves_known_document_commit():
+    from ov_http.document_write import NODE_PATH
+
+    engine = Documents()
+    reply = engine.reply
+
+    def busy_after_commit(method, path, params, body):
+        if path == NODE_PATH and engine.after_ack:
+            return 409, error("CONFLICT", conflict_type="path_busy", uri="SECRET-owner")
+        return reply(method, path, params, body)
+
+    engine.reply = busy_after_commit
+    async with invoke(engine) as (run, _, _):
+        answer, failed = await run(**args(filename="old.md", overwrite=True))
+    assert not failed, answer
+    assert answer["outcome"] == "committed"
+    assert answer["verification"]["status"] == "unavailable"
+    assert len(engine.effects) == 1
+    assert "SECRET" not in str(answer)

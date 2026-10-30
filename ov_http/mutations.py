@@ -117,7 +117,10 @@ class Mutations:
             raise Refused()
         code = error.get("code")
         details = error.get("details")
-        if (not effect and status == 409 and code == "CONFLICT"
+        if (not effect and not self.state.get("dispatched")
+                and not self.state.get("effects_confirmed")
+                and not self.state.get("document_committed")
+                and status == 409 and code == "CONFLICT"
                 and isinstance(details, dict) and details.get("conflict_type") == "path_busy"):
             # This observation did not dispatch a mutation. Never expose the
             # upstream message, path or lock owner, and never retry here.

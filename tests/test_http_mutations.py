@@ -602,6 +602,9 @@ async def sdk(tmp_path):
             return await fixture.backend(request)
         assert request.headers["X-API-Key"] == SECRET
         body = await request.json() if request.method == "POST" else None
+        before_reply = getattr(engine, "before_reply", None)
+        if before_reply is not None:
+            await before_reply(request)
         status, value = engine.reply(request.method, request.url.path.removeprefix("/api/v1"),
                                     dict(request.query_params), body)
         return JSONResponse(value, status_code=status)
