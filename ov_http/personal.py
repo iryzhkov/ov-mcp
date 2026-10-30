@@ -10,6 +10,8 @@ from .auth import Refused, contains
 from .mutations import Mutations, OperationError, UNKNOWN
 from .reader import BudgetExhausted
 
+APPEND_MODE = "existing_only_no_auto_commit"
+PERSONAL_BACKEND_REVISION = "ffcf2972d73d5d54e01924da1ba04d72fb69d41b"
 PERSONAL_ACTIONS = ("memory.read", "memory.write", "session.read", "session.create", "session.append")
 ID = {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,128}$"}
 URI = {"type": "string", "minLength": 1, "maxLength": 1024}
@@ -36,7 +38,7 @@ PERSONAL_SPECS = {
                               {"session_id": ID}, ["session_id"]),
     "personal_session_create": ("Create a shared owned session with automatic commit explicitly disabled.",
                                 {}, []),
-    "personal_session_append": ("Unavailable: backend cannot atomically require an existing session with auto-commit disabled.",
+    "personal_session_append": ("Append one explicit message to an existing owned session with native locked disabled-policy checks; no automatic commit.",
                                 {"session_id": ID, "role": {"enum": ["user", "assistant"]}, "content": TEXT},
                                 ["session_id", "role", "content"]),
 }
@@ -71,7 +73,8 @@ class Personal:
 
     def authorize(self, action):
         c, p = self.b.config, self.p
-        if (c.personal_profile != "shared-owner-v1" or time.time() >= p.expires
+        if (c.personal_profile != "shared-owner-v1"
+                or c.personal_backend_revision != PERSONAL_BACKEND_REVISION or time.time() >= p.expires
                 or p.subject not in c.personal_subjects or not p.personal_user
                 or p.personal_account != c.personal_account or p.personal_user != c.personal_user
                 or action not in p.personal_actions):
@@ -159,8 +162,26 @@ class Personal:
     async def call(self, name, a):
         if name == "personal_session_append":
             self.authorize("session.append")
-            raise OperationError({"error": "Backend lacks atomic existing-only append with auto-commit disabled.",
-                                  "outcome": "not_started", "supported": False})
+            sid = self.sid(a["session_id"])
+            if a["role"] not in ("user", "assistant") or len(a["content"].encode()) > 16384:
+                raise Refused()
+            # No preflight: the native mode checks existence and authoritative
+            # disabled policy under the same lock as the message append.
+            row = await self.request("session.append", "POST", "/sessions/" + sid + "/messages",
+                                     effect=True, json={"role": a["role"], "content": a["content"],
+                                                        "append_mode": APPEND_MODE, "telemetry": False})
+            if (not isinstance(row, dict) or row.get("session_id") != sid
+                    or row.get("append_mode") != APPEND_MODE
+                    or row.get("auto_commit_scheduled") is not False
+                    or type(row.get("message_count")) is not int
+                    or not 1 <= row["message_count"] <= 2**31 - 1
+                    or type(row.get("pending_tokens")) is not int
+                    or not 0 <= row["pending_tokens"] <= 2**53 - 1):
+                raise Refused()
+            return {"session_id": sid, "uri": self.session_root + "/" + sid,
+                    "outcome": "committed", "append_mode": APPEND_MODE,
+                    "auto_commit_scheduled": False, "message_count": row["message_count"],
+                    "pending_tokens": row["pending_tokens"]}
         if name == "personal_session_list":
             rows = await self.request("session.read", "GET", "/sessions")
             if not isinstance(rows, list) or len(rows) > 256:

@@ -100,7 +100,7 @@ class Config:
                     or any(not isinstance(s, str) or not 1 <= len(s) <= 256
                            or any(ord(c) < 33 for c in s) for s in self.personal_subjects)
                     or len(set(self.personal_subjects)) != len(self.personal_subjects)
-                    or self.personal_backend_revision != "7adf8b5fbcaa3293ef2a0b0ed44f864477401c39"):
+                    or self.personal_backend_revision != "ffcf2972d73d5d54e01924da1ba04d72fb69d41b"):
                 raise ValueError("personal profile requires exact owner, subjects and backend pin")
         object.__setattr__(self, "personal_subjects", tuple(self.personal_subjects))
         roots = self.namespace_roots
