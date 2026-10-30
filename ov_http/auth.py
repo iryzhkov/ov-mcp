@@ -116,6 +116,9 @@ class Principal:
     grant_digest: str
     actions: tuple[str, ...] = ("read",)
     uri_policy: str = LEGACY_URI_POLICY
+    personal_account: str = ""
+    personal_user: str = ""
+    personal_actions: tuple[str, ...] = ()
 
     def canonical(self, uri: str) -> str:
         if self.uri_policy == LEGACY_URI_POLICY:
@@ -293,6 +296,9 @@ class Verifier:
                 raise Refused()
             if self.config.namespace_roots and any(not self.config.admits_namespace(r) for r in roots):
                 raise Refused()
+            from .personal import personal_grant, PERSONAL_ACTIONS
+            personal = personal_grant(self.config, claims, subject, scope)
+            personal_scopes = {"ov.personal." + a for a in PERSONAL_ACTIONS} if personal else set()
             actions = ("read",)
             if "ov_actions" in claims:
                 declared = claims["ov_actions"]
@@ -301,17 +307,20 @@ class Verifier:
                         or declared != [a for a in ACTIONS if a in declared]
                         or "read" not in declared
                         or any("ov." + a not in scope.split() for a in declared)
-                        or any(s not in {"ov." + a for a in ACTIONS} for s in scope.split())):
+                        or any(s not in {"ov." + a for a in ACTIONS} | personal_scopes for s in scope.split())):
                     raise Refused()
                 actions = tuple(declared)
             # Bind continuation/cache identity to effective authority, including
             # action reductions for the same subject and namespace grants.
             authority = [roots, actions]
+            if personal:
+                authority.append(personal)
             if uri_policy != LEGACY_URI_POLICY:
                 authority.append(uri_policy)
             digest = hashlib.sha256(json.dumps(
                 authority, separators=(",", ":")).encode()).hexdigest()
-            return Principal(subject, roots, expires, digest, actions, uri_policy)
+            return Principal(subject, roots, expires, digest, actions, uri_policy,
+                             *(personal or ("", "", ())))
         except (ValueError, TypeError, KeyError, RecursionError, jwt.PyJWTError,
                 httpx.HTTPError, TimeoutError):
             raise Refused() from None

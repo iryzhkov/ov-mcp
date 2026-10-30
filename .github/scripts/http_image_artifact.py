@@ -11,18 +11,19 @@ import tarfile
 
 BASE = "docker.io/library/python:3.13-slim-trixie@sha256:fea139ecc0ab98360ead50b38872df6d42cf3503bec83215461224cbef0c8269"
 BASE_CONFIG = "sha256:174c59289bb55d8266f1669fa4b2893ea11d0a0555f027884bd83aeabc7b2bd0"
-# Native-incident product bytes qualified by Chaldea 288cfcaf-f20b-4cfe-a325-5d148d9015dd.
-# Other context inputs retain the prior reviewed public integration pins.
+# Shared-owner/explicit-append source with the final native-create backend contract.
+# Exact product/context qualification is recorded in the implementation receipt; no image built.
 INPUTS = {
     "Dockerfile": "f9cd4e1d68c4e79fe818476aee9c9eec1754cd82d83631f3497754c5699f9230",
     "requirements-http.lock": "9a2d3ee2755958f1053729c36ed28f26290d830aee0f6abd4e0d9d24d2bc41a7",
     "ov_http/__init__.py": "3ab2b85dfb48c88b2cb8375956dbc4b619775b8332596357cbaf12f7cb9497dc",
     "ov_http/__main__.py": "645edce5c993b36ed74f42ef734d79d50ce0b836dbd4705b9ea8d59bce0bb6e1",
-    "ov_http/app.py": "b02ddd1532e69e22b63eaa2eb22a80fd12f3f2bafd7939a43dae270c2ad98167",
-    "ov_http/auth.py": "74b38a42ae65fd15f686c26b9f3866a8bb2c935a836f122b9008e8313fe8b093",
-    "ov_http/config.py": "e02fc83629be65ebf40252450306f7787f1bc35b7f8cbfa017c77b73b7646fa9",
+    "ov_http/app.py": "3a87ebcefd76eefde9e7e3c44719846e5489d6750e5850b0259b08ea38c9db67",
+    "ov_http/auth.py": "8cbd85bd219b5e45f34e05cbfbcad56e03bf5361eeb90d458ae98dde473fd945",
+    "ov_http/config.py": "365ff98c9b4547adaded19279dea8b99cc98299ca269d6698be381302aab6c22",
     "ov_http/document_write.py": "a1988cd9dfb84b93885dc6814feab3dcbc2d94a97a9738ab8d7b323949f436bf",
     "ov_http/mutations.py": "8affa7e8b1200e2b633545c621c38d9138eb76a89074357027c304c2e4a6136e",
+    "ov_http/personal.py": "72ee79000d38d80740a0f938631e8c7ea7d785460db84acf31cead0df4ee8f28",
     "ov_http/reader.py": "aede8416bdcb756b6b5e709f7ce63af66a5f5d40975c680f3d28254cbe7dfe88",
 }
 OUT = Path("http-image-artifact")
