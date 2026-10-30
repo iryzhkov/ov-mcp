@@ -125,7 +125,8 @@ class DocumentWriter:
 
     async def observe(self, uri):
         self.p.require_action("read", uri)
-        value = await self.m.request("GET", NODE_PATH, params={"uri": uri})
+        value = await self.m.request("GET", NODE_PATH, params={"uri": uri},
+                                     error_projection=self.project_observation_error)
         self.p.require_action("read", uri)
         if (
             not isinstance(value, dict)
@@ -135,6 +136,21 @@ class DocumentWriter:
         ):
             raise Refused()
         return node(value["result"]["node"])
+
+    def project_observation_error(self, status, error):
+        # Read-only diagnostics use exact allowlisted protocol text, never details.
+        categories = {
+            "Document URI must be canonical resources content": "invalid_document_uri",
+            "Directory fragment controls are unsupported": "directory_fragment_controls",
+            "Resource document has residual index state": "residual_index_state",
+            "Document context inventory incomplete": "context_inventory_incomplete",
+            "Document context limit exceeded": "context_limit",
+            "Document aliases are unsupported": "document_alias",
+        }
+        if status in {400, 409}:
+            message = error.get("message")
+            if isinstance(message, str) and message in categories:
+                self.m.state["preflight_category"] = categories[message]
 
     async def contract(self):
         self.p.require_action("read")
@@ -377,7 +393,9 @@ class DocumentWriter:
         checks = self.checks([to, *generated], actions) + self.m.ancestor_checks(
             self.target
         )
+        self.m.state["preflight_stage"] = "parent"
         await self.m.existing_parent(self.target, "write")
+        self.m.state["preflight_stage"] = "target_node"
         expected = await self.observe(self.target)
         if expected["kind"] != "absent" and not a.get("overwrite", False):
             raise OperationError(
@@ -396,6 +414,7 @@ class DocumentWriter:
             else "ingest"
         )
         if expected["kind"] != "absent":
+            self.m.state["preflight_stage"] = "subtree"
             checks += self.checks(generated, ("remove",))
             paths = (
                 await self.m.subtree(self.target, "read")
@@ -403,6 +422,7 @@ class DocumentWriter:
                 else [self.target]
             )
             checks += self.checks(paths, ("read", "write", "maintain", "remove"))
+            self.m.state["preflight_stage"] = "backup"
             archive = (
                 to
                 if set(to.split("/")) & {"archive", "archived", "_archive"}
@@ -440,9 +460,14 @@ class DocumentWriter:
         }
         if self.backup is not None:
             payload["backup_uri"] = self.backup
+        self.m.state["preflight_stage"] = "contract"
         await self.contract()
         for action, uri in checks:
             self.p.require_action(action, uri)
+        self.m.state["preflight_stage"] = "ready"
+        if a.get("dry_run") is True:
+            return {"outcome": "not_started", "preflight_passed": True,
+                    "retry_safe": False, "indexing": "not_observed"}
         value = await self.m.request(
             "POST",
             WRITE_PATH,

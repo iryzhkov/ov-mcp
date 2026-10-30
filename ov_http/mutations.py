@@ -26,10 +26,11 @@ BOOL = {"type": "boolean"}
 MUTATION_SPECS = {
     "memory_write": (
         "Conditional document publication with observed typed revisions and retained protected backups. "
-        "Processing acceptance is not revision-bound indexing. Explicit file-deferred-v1 stays deferred.",
+        "Processing acceptance is not revision-bound indexing. Explicit file-deferred-v1 stays deferred. "
+        "dry_run=true checks default-write preflight without dispatch; it never reserves a revision.",
         {"text": {"type": "string", "maxLength": 1048576}, "to": URI, "filename": URI,
          "reason": {"type": "string", "maxLength": 1024}, "overwrite": BOOL, "archived": BOOL,
-         "verbatim": BOOL, "verify": BOOL,
+         "verbatim": BOOL, "verify": BOOL, "dry_run": BOOL,
          "storage": {"type": "string", "enum": ["legacy-chunked", "file-deferred-v1"]},
          "expected_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}},
         ["text", "to", "filename"]),
@@ -89,6 +90,8 @@ class Mutations:
     async def request(self, method, endpoint, *, effect=False, precondition_conflicts=True,
                       error_projection=None, **kwargs):
         b = self.backend
+        if self.state.get("document_dry_run") and (effect or method != "GET"):
+            raise Refused()
         b.check_budget()
         b.requests += 1
         if effect:
@@ -126,7 +129,7 @@ class Mutations:
             # upstream message, path or lock owner, and never retry here.
             raise OperationError({"error": "Resource is busy; no mutation dispatched.",
                                   "outcome": "not_started", "busy": True, "retry_safe": False})
-        if effect and error_projection is not None:
+        if error_projection is not None and (effect or self.state.get("document_dry_run")):
             error_projection(status, error)
         if not effect and status == 404 and code == "NOT_FOUND":
             return None
@@ -220,6 +223,10 @@ class Mutations:
         return nodes
 
     async def write(self, a):
+        if type(a.get("dry_run", False)) is not bool:
+            raise Refused()
+        if a.get("dry_run") and a.get("storage", "legacy-chunked") != "legacy-chunked":
+            unsupported("Dry run supports default document writes only; no mutation dispatched.")
         if a.get("storage", "legacy-chunked") == "legacy-chunked":
             from .document_write import DocumentWriter
             return await DocumentWriter(self).write(a)
@@ -504,6 +511,21 @@ class Mutations:
 
 
 async def call_mutation(backend, name, arguments, state):
+    dry_run = name == "memory_write" and arguments.get("dry_run") is True
+    if dry_run:
+        state["document_dry_run"] = True
+        state["preflight_stage"] = "authorization"
+    value, failed = await _call_mutation(backend, name, arguments, state)
+    if dry_run:
+        # Fixed vocabulary only; never expose backend bodies or descendant names.
+        value.update(dry_run=True, dispatched=False, preflight={
+            "stage": state["preflight_stage"],
+            "category": state.get("preflight_category", "unavailable" if failed else "passed"),
+        })
+    return value, failed
+
+
+async def _call_mutation(backend, name, arguments, state):
     operation = Mutations(backend, state)
     try:
         cap = LONG_MUTATION_SECONDS if name in LONG_MUTATION_NAMES else 20
