@@ -153,12 +153,14 @@ class DocumentWriter:
             if isinstance(message, str) and message in categories:
                 self.m.state["preflight_category"] = categories[message]
 
-    async def contract(self):
+    async def contract(self, exact=False):
         self.p.require_action("read")
-        value = await self.m.request("GET", CONTRACT_PATH)
+        required = dict(CONTRACT, version=2) if exact else CONTRACT
+        options = {"params": {"version": 2}} if exact else {}
+        value = await self.m.request("GET", CONTRACT_PATH, **options)
         if (
             not isinstance(value, dict)
-            or value.get("result") != CONTRACT
+            or value.get("result") != required
             or type(value["result"].get("version")) is not int
         ):
             from .mutations import unsupported
@@ -293,7 +295,12 @@ class DocumentWriter:
                 result["status"] = "concurrent_change"
                 return result
             # Reuse the actual Reader and its existing finite traversal/budgets.
-            text, sources = await Reader(self.m.backend).assemble(self.target)
+            reader = Reader(self.m.backend)
+            text, sources = (
+                await reader.assemble(self.target, exact_directory=True)
+                if answer["representation"] == "exact_directory"
+                else await reader.assemble(self.target)
+            )
             if await self.observe(self.target) != answer["node"]:
                 result["status"] = "concurrent_change"
             else:
@@ -350,6 +357,9 @@ class DocumentWriter:
                 "error": "Default document writes use observed node CAS; expected_sha256 requires storage=file-deferred-v1.",
                 "outcome": "not_started", "supported": False,
             })
+        exact = a.get("storage") == "exact-directory-v2"
+        if exact and a.get("verbatim", False):
+            unsupported("Exact directory storage cannot retarget to .verbatim.")
         to, filename = a["to"], a["filename"]
         if (
             not isinstance(filename, str)
@@ -382,7 +392,7 @@ class DocumentWriter:
             self.target + "/.abstract.md",
             self.target + "/.overview.md",
         ]
-        if a.get("verbatim", False):
+        if a.get("verbatim", False) or exact:
             generated += [
                 self.target + "/0001",
                 self.target + "/0001/0000.md",
@@ -407,7 +417,10 @@ class DocumentWriter:
                     "conflict": True,
                 }
             )
+        if exact and expected["kind"] != "directory":
+            unsupported("Exact directory storage requires an existing directory.")
         representation = (
+            "exact_directory" if exact else
             "verbatim"
             if a.get("verbatim", False)
             else "raw_file"
@@ -470,7 +483,9 @@ class DocumentWriter:
         if self.backup is not None:
             payload["backup_uri"] = self.backup
         self.m.state["preflight_stage"] = "contract"
-        await self.contract()
+        await self.contract(exact)
+        if exact:
+            payload["contract_version"] = 2
         for action, uri in checks:
             self.p.require_action(action, uri)
         self.m.state["preflight_stage"] = "ready"
@@ -492,6 +507,7 @@ class DocumentWriter:
                 "ingest": "parsed_directory",
                 "raw_file": "raw_file",
                 "verbatim": "verbatim_directory",
+                "exact_directory": "exact_directory",
             }[representation],
             hashlib.sha256(raw).hexdigest(),
         )

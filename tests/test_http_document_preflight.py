@@ -12,6 +12,80 @@ from test_http_acceptance import SECRET, call
 from ov_http.document_write import CONTRACT_PATH, NODE_PATH, WRITE_PATH, DocumentWriter
 
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capability", [None, {"contract": "resources-document-write", "version": 1},
+                                      {"contract": "resources-document-write", "version": True},
+                                      {"contract": "resources-document-write", "version": 2, "extra": True}])
+async def test_exact_directory_requires_closed_v2_before_post(capability):
+    engine = Documents()
+    target = A + "/new.md"
+    engine.dirs.add(target)
+    engine.files[target + "/old.md"] = b"old"
+    engine.document_contract = capability
+    async with invoke(engine) as (run, _, _):
+        answer, failed = await run(**args(storage="exact-directory-v2", overwrite=True))
+    assert failed and answer["outcome"] == "not_started"
+    assert not engine.effects and all(c[0] == "GET" for c in engine.calls)
+
+
+@pytest.mark.asyncio
+async def test_exact_directory_roundtrip_original_uri_and_backup():
+    from ov_http.reader import Reader
+
+    engine = Documents()
+    target = A + "/new.md"
+    engine.dirs.add(target)
+    engine.files[target + "/old.md"] = b"old exact\r\n "
+    engine.files[target + "/.relations.json"] = b'{"relations":[]}'
+    engine.document_contract = {"contract": "resources-document-write", "version": 2}
+    body = "# Original Ω\n\n## Decisions 漢字\n\n" + ("  cobalt Ω  \t\n\n" * 650) + "\r\n "
+    assert len(body.encode()) > len(body) > 6000
+    async with invoke(engine) as (run, _, backend):
+        answer, failed = await run(**args(text=body, storage="exact-directory-v2", overwrite=True))
+        assert not failed, answer
+        assert answer["uri"] == target and answer["verification"]["status"] == "exact"
+        observed = await Reader(backend).read(target, limit=2000, storage="exact-directory-v2")
+        assert observed["text"].encode() == body.encode() and not observed["truncated"]
+    backup = answer["backup"]["uri"]
+    assert engine.files[backup + "/old.md"] == b"old exact\r\n "
+    assert engine.files[backup + "/.relations.json"] == b'{"relations":[]}'
+    contract = next(c for c in engine.calls if c[1] == CONTRACT_PATH)
+    assert str(contract[2]["version"]) == "2"
+    payload = next(c[3] for c in engine.calls if c[1] == WRITE_PATH)
+    assert payload["target_uri"] == target and payload["contract_version"] == 2
+    assert payload["representation"] == "exact_directory"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fault", ["remove", "sidecar_denied", "stale_sidecar", "verbatim", "file", "absent"])
+async def test_exact_directory_denials_preserve_content(fault):
+    engine = Documents()
+    target = A + "/new.md"
+    engine.dirs.add(target)
+    engine.files[target + "/.relations.json"] = b"old private metadata"
+    engine.document_contract = {"contract": "resources-document-write", "version": 2}
+    options, arguments = {}, {}
+    if fault == "remove":
+        options["actions"] = ("read", "write", "maintain")
+    elif fault == "sidecar_denied":
+        engine.list_poison = {"uri": target + "/.relations.json", "isDir": False, "access": "denied"}
+    elif fault == "stale_sidecar":
+        engine.before_post = lambda uri: engine.files.update({uri + "/.relations.json": b"concurrent"})
+    elif fault == "verbatim":
+        arguments["verbatim"] = True
+    elif fault in {"file", "absent"}:
+        engine.dirs.remove(target)
+        engine.files.clear()
+        if fault == "file":
+            engine.files[target] = b"old"
+    async with invoke(engine, **options) as (run, _, _):
+        answer, failed = await run(**args(storage="exact-directory-v2", overwrite=True, **arguments))
+    assert failed and not engine.effects and not engine.backups
+    assert answer["outcome"] in {"not_started", "target_unchanged"}
+    assert all(c[0] == "GET" for c in engine.calls) or fault == "stale_sidecar"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["absent", "file", "directory"])
 async def test_dry_run_prepares_without_any_mutation(kind):

@@ -18,13 +18,13 @@ INPUTS = {
     "requirements-http.lock": "9a2d3ee2755958f1053729c36ed28f26290d830aee0f6abd4e0d9d24d2bc41a7",
     "ov_http/__init__.py": "3ab2b85dfb48c88b2cb8375956dbc4b619775b8332596357cbaf12f7cb9497dc",
     "ov_http/__main__.py": "645edce5c993b36ed74f42ef734d79d50ce0b836dbd4705b9ea8d59bce0bb6e1",
-    "ov_http/app.py": "3a87ebcefd76eefde9e7e3c44719846e5489d6750e5850b0259b08ea38c9db67",
+    "ov_http/app.py": "25d9df238439f9a28ae1b106eda660c7f0369e8abd5174c4af22fad44a46b3d5",
     "ov_http/auth.py": "8cbd85bd219b5e45f34e05cbfbcad56e03bf5361eeb90d458ae98dde473fd945",
     "ov_http/config.py": "365ff98c9b4547adaded19279dea8b99cc98299ca269d6698be381302aab6c22",
-    "ov_http/document_write.py": "f0745b58e8d6669235fc2d76399e39cc47944e5f3bd01f0300bc7646637472c3",
-    "ov_http/mutations.py": "657381e5baeba903a59a2161b001ca00f2b6b33c077e21d4ba85d459026a5550",
+    "ov_http/document_write.py": "bae35c8ed01afe9a3f27b8f5b5a92175578a9ce829404cb5307c69dae7ed505f",
+    "ov_http/mutations.py": "cadaf95f9c1e98453304284abd6d5ffdd75eb86bea91b45b9b2a8713b3102523",
     "ov_http/personal.py": "72ee79000d38d80740a0f938631e8c7ea7d785460db84acf31cead0df4ee8f28",
-    "ov_http/reader.py": "aede8416bdcb756b6b5e709f7ce63af66a5f5d40975c680f3d28254cbe7dfe88",
+    "ov_http/reader.py": "a362f0b6396447cc624113a6b0175c7ed715426f6a5eeb18a02d0463c06f1ba3",
 }
 OUT = Path("http-image-artifact")
 CONTEXT = Path(".scratch/context")

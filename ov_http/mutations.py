@@ -27,11 +27,12 @@ MUTATION_SPECS = {
     "memory_write": (
         "Conditional document publication with observed typed revisions and retained protected backups. "
         "Processing acceptance is not revision-bound indexing. Explicit file-deferred-v1 stays deferred. "
-        "dry_run=true checks default-write preflight without dispatch; it never reserves a revision.",
+        "dry_run=true checks preflight without dispatch; it never reserves a revision. "
+        "storage=exact-directory-v2 replaces an existing directory at its original URI byte for byte.",
         {"text": {"type": "string", "maxLength": 1048576}, "to": URI, "filename": URI,
          "reason": {"type": "string", "maxLength": 1024}, "overwrite": BOOL, "archived": BOOL,
          "verbatim": BOOL, "verify": BOOL, "dry_run": BOOL,
-         "storage": {"type": "string", "enum": ["legacy-chunked", "file-deferred-v1"]},
+         "storage": {"type": "string", "enum": ["legacy-chunked", "file-deferred-v1", "exact-directory-v2"]},
          "expected_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}},
         ["text", "to", "filename"]),
     "memory_mkdir": ("Create one exact directory and its authorized abstract beneath an existing parent. "
@@ -240,9 +241,9 @@ class Mutations:
     async def write(self, a):
         if type(a.get("dry_run", False)) is not bool:
             raise Refused()
-        if a.get("dry_run") and a.get("storage", "legacy-chunked") != "legacy-chunked":
+        if a.get("dry_run") and a.get("storage", "legacy-chunked") not in {"legacy-chunked", "exact-directory-v2"}:
             unsupported("Dry run supports default document writes only; no mutation dispatched.")
-        if a.get("storage", "legacy-chunked") == "legacy-chunked":
+        if a.get("storage", "legacy-chunked") in {"legacy-chunked", "exact-directory-v2"}:
             from .document_write import DocumentWriter
             return await DocumentWriter(self).write(a)
         if a.get("storage") != "file-deferred-v1":
@@ -544,7 +545,7 @@ async def _call_mutation(backend, name, arguments, state):
     operation = Mutations(backend, state)
     try:
         document_write = (name == "memory_write"
-                          and arguments.get("storage", "legacy-chunked") == "legacy-chunked"
+                          and arguments.get("storage", "legacy-chunked") in {"legacy-chunked", "exact-directory-v2"}
                           and arguments.get("dry_run") is not True)
         cap = LONG_MUTATION_SECONDS if name in LONG_MUTATION_NAMES or document_write else 20
         remaining = min(cap, backend.principal.expires - time.time())

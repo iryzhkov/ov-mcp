@@ -103,6 +103,7 @@ class Documents(TypedBackend):
                 "representation",
                 "expected",
                 "backup_uri",
+                "contract_version",
             }
             assert set(body) >= {
                 "target_uri",
@@ -112,7 +113,7 @@ class Documents(TypedBackend):
                 "representation",
                 "expected",
             }
-            assert body["representation"] in {"raw_file", "ingest", "verbatim"}
+            assert body["representation"] in {"raw_file", "ingest", "verbatim", "exact_directory"}
             assert "/" not in body["source_name"] and not body["source_name"].endswith(
                 ".verbatim"
             )
@@ -168,13 +169,18 @@ class Documents(TypedBackend):
             else:
                 self.dirs.add(target)
                 part = target + "/0000.md"
-                if body["representation"] == "verbatim":
-                    assert target.endswith(".verbatim")
+                if body["representation"] in {"verbatim", "exact_directory"}:
+                    if body["representation"] == "verbatim":
+                        assert target.endswith(".verbatim")
+                    else:
+                        assert body["contract_version"] == 2 and expected["kind"] == "directory"
                     self.dirs.add(target + "/0001")
                     part = target + "/0001/0000.md"
                 self.files[part] = body["text"].encode()
                 representation = (
-                    "verbatim_directory"
+                    "exact_directory"
+                    if body["representation"] == "exact_directory"
+                    else "verbatim_directory"
                     if body["representation"] == "verbatim"
                     else "parsed_directory"
                 )

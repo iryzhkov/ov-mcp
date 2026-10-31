@@ -46,7 +46,8 @@ SPECS = {
                     {"uri": URI_ARG}, ["uri"]),
     "memory_read": ("Read a file or reassemble chunked document in natural name order. Offset and limit are lines.",
                     {"uri": URI_ARG, "offset": {"type": "integer", "minimum": 0, "maximum": 100000},
-                     "limit": {"type": "integer", "minimum": 1, "maximum": 2000}, "parts": BOOL}, ["uri"]),
+                     "limit": {"type": "integer", "minimum": 1, "maximum": 2000}, "parts": BOOL,
+                     "storage": {"type": "string", "enum": ["legacy-chunked", "exact-directory-v2"]}}, ["uri"]),
     "memory_abstract": ("Read this authorized directory's hidden abstract. No parent fallback.",
                         {"uri": URI_ARG}, ["uri"]),
     "memory_overview": ("Read this authorized directory's hidden overview. No parent fallback.",
@@ -226,7 +227,8 @@ def create_app(config: Config, *, jwks_ssl_context: ssl.SSLContext | None = None
                     value = await reader.relations(arguments["uri"])
                 else:
                     value = await reader.read(arguments["uri"], arguments.get("offset", 0),
-                                              arguments.get("limit", 500), arguments.get("parts", False))
+                                              arguments.get("limit", 500), arguments.get("parts", False),
+                                              arguments.get("storage", "legacy-chunked"))
             if time.time() >= principal.expires:
                 raise Refused()
             return result(value)

@@ -252,13 +252,21 @@ class Reader:
             truncated = True
         return sorted(nodes, key=lambda n: natural(n["uri"])), truncated
 
-    async def assemble(self, uri: str):
+    async def assemble(self, uri: str, *, exact_directory: bool = False):
         st = await self.backend.stat(uri)
         if not st["isDir"]:
+            if exact_directory:
+                raise Refused()
             return await self.backend.text(uri), [uri]
         nodes, truncated = await self.walk(uri, atomic=True)
         if truncated:
             raise BudgetExhausted()
+        if exact_directory:
+            files = [n["uri"] for n in nodes if not n["isDir"]
+                     and not n["uri"].rsplit("/", 1)[-1].startswith(".")]
+            if files != [uri + "/0001/0000.md"]:
+                raise Refused()
+            return await self.backend.text(files[0]), files
         sources, chunks = [], []
         for node in nodes:
             part = node["uri"]
@@ -281,8 +289,11 @@ class Reader:
             text += (separator if text else "") + chunk
         return text, sources
 
-    async def read(self, uri: str, offset: int = 0, limit: int = 500, parts: bool = False):
-        text, sources = await self.assemble(uri)
+    async def read(self, uri: str, offset: int = 0, limit: int = 500, parts: bool = False,
+                   storage: str = "legacy-chunked"):
+        if storage not in {"legacy-chunked", "exact-directory-v2"}:
+            raise Refused()
+        text, sources = await self.assemble(uri, exact_directory=storage == "exact-directory-v2")
         lines = text.split("\n")
         selected = "\n".join(lines[offset:offset + limit])
         truncated = offset + limit < len(lines) or len(selected) > 24000
