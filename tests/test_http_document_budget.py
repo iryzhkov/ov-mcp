@@ -20,7 +20,7 @@ from ov_http.document_write import WRITE_PATH
 
 
 @pytest.mark.asyncio
-async def test_real_document_response_crosses_both_short_deadlines():
+async def test_real_document_response_crosses_former_sixty_second_deadline():
     engine = Documents()
     seen = []
 
@@ -28,7 +28,7 @@ async def test_real_document_response_crosses_both_short_deadlines():
         path = request.url.path.removeprefix("/api/v1")
         seen.append((request.method, path))
         if path == WRITE_PATH:
-            await asyncio.sleep(21)
+            await asyncio.sleep(61)
         body = await request.json() if request.method == "POST" else None
         status, value = engine.reply(request.method, path, dict(request.query_params), body)
         return JSONResponse(value, status_code=status)
@@ -40,11 +40,12 @@ async def test_real_document_response_crosses_both_short_deadlines():
                               "fixture-grants", ACTIONS, cfg.uri_policy)
         backend = Backend(cfg, principal, client)
         start = time.monotonic()
-        async with asyncio.timeout(65):
+        async with asyncio.timeout(125):
             answer, failed = await call_mutation(backend, "memory_write", args(verify=False), {})
         elapsed = time.monotonic() - start
     assert not failed and answer["outcome"] == "committed"
-    assert 20 < elapsed < 65
+    assert 60 < elapsed < 125
+    assert answer["retry_safe"] is False
     assert seen.count(("POST", WRITE_PATH)) == 1
     assert len(engine.effects) == 1
 
@@ -71,15 +72,19 @@ async def test_actual_httpx_timeout_extensions(endpoint, effect, long):
             backend.client = client
             await Mutations(backend).request("POST" if effect else "GET", endpoint, effect=effect)
             assert client.timeout == httpx.Timeout(10)
-    assert observed == [dict(connect=5, pool=5, read=60, write=60) if long
-                        else dict(connect=10, pool=10, read=10, write=10)]
+    assert observed == [dict(connect=5, pool=5, read=120, write=5)
+                        if endpoint == WRITE_PATH and effect else
+                        dict(connect=5, pool=5, read=60, write=60) if long else
+                        dict(connect=10, pool=10, read=10, write=10)]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name,changes,cap", [
-    ("memory_write", {}, 70),
-    ("memory_write", {"storage": "legacy-chunked"}, 70),
-    ("memory_write", {"dry_run": False}, 70),
+    ("memory_write", {}, 130),
+    ("memory_write", {"storage": "legacy-chunked"}, 130),
+    ("memory_write", {"storage": "exact-directory-v2"}, 130),
+    ("memory_write", {"storage": "exact-directory-v2", "dry_run": True}, 20),
+    ("memory_write", {"dry_run": False}, 130),
     ("memory_write", {"dry_run": True}, 20),
     ("memory_write", {"storage": "file-deferred-v1"}, 20),
     ("memory_write", {"storage": "file-deferred-v1", "dry_run": True}, 20),
@@ -148,7 +153,14 @@ async def test_document_long_allowance_keeps_shared_budgets(budget):
 async def test_real_task_cancellation_after_post_never_retries(monkeypatch, committed):
     engine = Documents()
     reached = asyncio.Event()
+    gate_timeouts = []
+    original_wait = asyncio.wait
 
+    async def wait(tasks, **kwargs):
+        gate_timeouts.append(kwargs["timeout"])
+        return await original_wait(tasks, **kwargs)
+
+    monkeypatch.setattr("ov_http.app.asyncio.wait", wait)
     async with invoke(engine) as (run, principal, backend):
         original = backend.client.send
         posts = []
@@ -198,3 +210,70 @@ async def test_real_task_cancellation_after_post_never_retries(monkeypatch, comm
     assert answer.get("retry_safe") is False
     assert len(engine.effects) == int(committed)
     assert len(posts) == 1
+    assert gate_timeouts == [135]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("storage,dry_run,post_path", [
+    (None, False, WRITE_PATH),
+    ("legacy-chunked", False, WRITE_PATH),
+    ("exact-directory-v2", False, WRITE_PATH),
+    ("exact-directory-v2", True, None),
+    (None, True, None),
+    ("file-deferred-v1", False, "/content/batch-write"),
+])
+async def test_write_path_timeout_selection(storage, dry_run, post_path):
+    engine = Documents()
+    changes = dict(dry_run=dry_run, verify=False)
+    if storage:
+        changes["storage"] = storage
+    if storage == "exact-directory-v2":
+        target = A + "/new.md"
+        engine.dirs.add(target)
+        engine.files[target + "/old.md"] = b"old"
+        engine.document_contract = {"contract": "resources-document-write", "version": 2}
+        changes["overwrite"] = True
+    observed = []
+    async with invoke(engine) as (run, _, backend):
+        original = backend.client.send
+
+        async def send(request, **kwargs):
+            observed.append((request.method, request.url.path.removeprefix("/api/v1"),
+                             request.extensions["timeout"]))
+            return await original(request, **kwargs)
+
+        backend.client.send = send
+        answer, failed = await run(**args(**changes))
+    assert not failed, answer
+    posts = [(path, timeout) for method, path, timeout in observed if method == "POST"]
+    assert [p for p, _ in posts] == ([] if post_path is None else [post_path])
+    for method, path, timeout in observed:
+        if path == WRITE_PATH and method == "POST":
+            assert timeout == dict(connect=5, pool=5, read=120, write=5)
+        else:
+            assert timeout == dict(connect=5, pool=5, read=5, write=5)
+
+
+@pytest.mark.asyncio
+async def test_document_expiry_during_post_cancels_without_retry():
+    engine = Documents()
+    posted = []
+    cancelled = []
+    async with invoke(engine, expires=time.time() + 0.2) as (run, _, backend):
+        original = backend.client.send
+
+        async def send(request, **kwargs):
+            if request.method == "POST" and request.url.path.endswith(WRITE_PATH):
+                posted.append(request)
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    cancelled.append(True)
+                    raise
+            return await original(request, **kwargs)
+
+        backend.client.send = send
+        async with asyncio.timeout(3):
+            answer, failed = await run(**args(verify=False))
+    assert failed and answer["outcome"] == "unknown" and answer["retry_safe"] is False
+    assert len(posted) == 1 and cancelled == [True] and not engine.effects

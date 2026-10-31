@@ -17,7 +17,7 @@ from .auth import Principal, Refused, Verifier
 from .config import Config, RESOURCES_PROFILE
 from .personal import PERSONAL_ACTIONS, PERSONAL_SPECS, PERSONAL_READ_ONLY, call_personal
 from .reader import Backend, BudgetExhausted, Reader, SAFE_ERROR
-from .mutations import LONG_MUTATION_SECONDS, MUTATION_SPECS, READ_ONLY, UNKNOWN, call_mutation
+from .mutations import DOCUMENT_WRITE_SECONDS, MUTATION_SPECS, READ_ONLY, UNKNOWN, call_mutation
 
 STRING = {"type": "string", "minLength": 1, "maxLength": 1024}
 URI_ARG = {**STRING, "description": "Canonical viking://resources/... URI within this token's grants."}
@@ -120,10 +120,11 @@ class SecurityGate:
                     return
                 await messages.put(message)
 
+        # Shared ceiling accommodates document writes; per-tool caps stay separate.
         request_task = asyncio.create_task(self.app(scope, messages.get, send))
         disconnect_task = asyncio.create_task(relay())
         try:
-            done, _ = await asyncio.wait({request_task, disconnect_task}, timeout=LONG_MUTATION_SECONDS + 5,
+            done, _ = await asyncio.wait({request_task, disconnect_task}, timeout=DOCUMENT_WRITE_SECONDS + 5,
                                          return_when=asyncio.FIRST_COMPLETED)
             if not done:
                 timeout_value = UNKNOWN if scope["ov.operation"].get("dispatched") else {"error": "Request timeout."}
