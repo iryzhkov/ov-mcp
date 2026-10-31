@@ -11,7 +11,7 @@ import tarfile
 
 BASE = "docker.io/library/python:3.13-slim-trixie@sha256:fea139ecc0ab98360ead50b38872df6d42cf3503bec83215461224cbef0c8269"
 BASE_CONFIG = "sha256:174c59289bb55d8266f1669fa4b2893ea11d0a0555f027884bd83aeabc7b2bd0"
-# Shared-owner source plus read-only document-write preflight diagnostics.
+# Document-write observation budget repair; source-only qualification.
 # Exact reviewed context pins; runtime/native qualification remains separate.
 INPUTS = {
     "Dockerfile": "f9cd4e1d68c4e79fe818476aee9c9eec1754cd82d83631f3497754c5699f9230",
@@ -22,7 +22,7 @@ INPUTS = {
     "ov_http/auth.py": "8cbd85bd219b5e45f34e05cbfbcad56e03bf5361eeb90d458ae98dde473fd945",
     "ov_http/config.py": "365ff98c9b4547adaded19279dea8b99cc98299ca269d6698be381302aab6c22",
     "ov_http/document_write.py": "f0745b58e8d6669235fc2d76399e39cc47944e5f3bd01f0300bc7646637472c3",
-    "ov_http/mutations.py": "5c89c30ce641277e2461ae78f5db49f9789ab328df2a1489d7dfcc36bb31f53a",
+    "ov_http/mutations.py": "657381e5baeba903a59a2161b001ca00f2b6b33c077e21d4ba85d459026a5550",
     "ov_http/personal.py": "72ee79000d38d80740a0f938631e8c7ea7d785460db84acf31cead0df4ee8f28",
     "ov_http/reader.py": "aede8416bdcb756b6b5e709f7ce63af66a5f5d40975c680f3d28254cbe7dfe88",
 }
