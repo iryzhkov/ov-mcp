@@ -2,6 +2,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 import json
+import logging
 import ssl
 import time
 
@@ -18,6 +19,10 @@ from .config import Config, RESOURCES_PROFILE
 from .personal import PERSONAL_ACTIONS, PERSONAL_SPECS, PERSONAL_READ_ONLY, call_personal
 from .reader import Backend, BudgetExhausted, Reader, SAFE_ERROR
 from .mutations import DOCUMENT_WRITE_SECONDS, MUTATION_SPECS, READ_ONLY, UNKNOWN, call_mutation
+
+WRITE_ADMISSION_SECONDS = DOCUMENT_WRITE_SECONDS + 15
+REFRESHABLE_LIFETIME_SECONDS = WRITE_ADMISSION_SECONDS + 15
+WRITE_ACTIONS = frozenset({"write", "remove", "maintain"})
 
 STRING = {"type": "string", "minLength": 1, "maxLength": 1024}
 URI_ARG = {**STRING, "description": "Canonical viking://resources/... URI within this token's grants."}
@@ -100,6 +105,13 @@ class SecurityGate:
                 raise Refused()
             async with asyncio.timeout(5):
                 principal = await self.verifier.verify(value[7:])
+            if (scope.get("method") == "POST"
+                    and self.config.mutation_profile != "disabled"
+                    and WRITE_ACTIONS.intersection(principal.actions)
+                    and principal.expires - principal.issued >= REFRESHABLE_LIFETIME_SECONDS
+                    and principal.expires - time.time() < WRITE_ADMISSION_SECONDS):
+                logging.getLogger(__name__).warning("ov-http admission lifetime-refused")
+                raise Refused()
         except (Refused, UnicodeError, TimeoutError):
             challenge = ('Bearer resource_metadata="' + self.config.metadata_url +
                          '", scope="ov.read"')

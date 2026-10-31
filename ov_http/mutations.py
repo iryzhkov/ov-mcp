@@ -17,6 +17,11 @@ PROFILE = "resources-document-mutations-v1"
 CONTRACT_PATH = "/fs/resources-only/mutation-contract"
 CONTRACT = {"contract": "resources-document-mutations", "version": 1}
 DOCUMENT_WRITE_SECONDS = 130
+LIFETIME_MARGIN_SECONDS = 5
+LIFETIME_NOT_STARTED = {
+    "error": "Authorization lifetime insufficient; no mutation dispatched.",
+    "outcome": "not_started", "dispatched": False, "retry_safe": False,
+}
 LONG_MUTATION_SECONDS = 70
 LONG_MUTATION_NAMES = frozenset({"memory_mv", "memory_reindex"})
 LONG_MUTATION_ENDPOINTS = frozenset({"/fs/mv", "/content/reindex"})
@@ -98,6 +103,11 @@ class Mutations:
         b.check_budget()
         b.requests += 1
         if effect:
+            if method == "POST" and endpoint == "/resources/document-write":
+                deadline = self.state.get("lifetime_deadline")
+                if deadline is not None and (b.principal.expires - time.time()
+                        < deadline - asyncio.get_running_loop().time() + LIFETIME_MARGIN_SECONDS):
+                    raise OperationError(dict(LIFETIME_NOT_STARTED))
             self.state["dispatched"] = True
             if method == "POST" and endpoint == "/resources/document-write":
                 # Measured native preparation exceeded 60s; finite headroom only.
@@ -552,10 +562,14 @@ async def _call_mutation(backend, name, arguments, state):
                           and arguments.get("storage", "legacy-chunked") in {"legacy-chunked", "exact-directory-v2"}
                           and arguments.get("dry_run") is not True)
         cap = DOCUMENT_WRITE_SECONDS if document_write else LONG_MUTATION_SECONDS if name in LONG_MUTATION_NAMES else 20
+        if document_write and backend.principal.expires - time.time() < cap + LIFETIME_MARGIN_SECONDS:
+            return dict(LIFETIME_NOT_STARTED), True
         remaining = min(cap, backend.principal.expires - time.time())
         if remaining <= 0:
             raise Refused()
-        async with asyncio.timeout(remaining):
+        async with asyncio.timeout(remaining) as budget:
+            if document_write:
+                state["lifetime_deadline"] = budget.when()
             value = await operation.run(name, arguments)
         backend.principal.require_action("read")
         if state.get("document_committed"):
