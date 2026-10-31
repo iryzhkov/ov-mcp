@@ -20,7 +20,7 @@ typed directory CAS including private sidecars, subtree ACLs, protected backups,
 leases and control guards. No grant, public URI rule or personal scope expands.
 Use `memory_read(uri=original_uri, storage="exact-directory-v2", limit=2000)`
 for the explicit raw roundtrip. It requires the exact single-content-member shape
-and preserves whitespace; normal read assembly is unchanged. Existing read size,
+among caller-visible members and preserves whitespace; normal read assembly is unchanged. Existing read size,
 line, traversal and output caps still apply. Write verification uses that same
 raw reader between typed node observations, without a linearizability claim.
 
