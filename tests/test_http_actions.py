@@ -112,6 +112,20 @@ async def test_grant_binding_changes_with_actions_but_not_ungranted_scope(signed
     assert write.actions == ("read", "write")
 
 
+@pytest.mark.asyncio
+async def test_verified_issued_is_retained_without_changing_grant_digest(signed):
+    import hashlib
+    import json
+
+    issued = int(time.time()) - 10
+    p = await verify(signed, iat=issued, exp=issued + 300)
+    other = await verify(signed, iat=issued - 10, exp=issued + 290)
+    assert p.issued == issued and type(p.issued) is int
+    expected = hashlib.sha256(json.dumps(
+        [p.roots, p.actions], separators=(",", ":")).encode()).hexdigest()
+    assert p.grant_digest == other.grant_digest == expected
+
+
 @pytest.mark.parametrize("uri", [
     ROOT + "/", ROOT + "/../user", ROOT + "/a//b", ROOT + "/%2e%2e/a",
     ROOT + "/a?x", ROOT + "/a#b", "viking://agent/a",

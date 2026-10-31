@@ -11,19 +11,19 @@ import tarfile
 
 BASE = "docker.io/library/python:3.13-slim-trixie@sha256:fea139ecc0ab98360ead50b38872df6d42cf3503bec83215461224cbef0c8269"
 BASE_CONFIG = "sha256:174c59289bb55d8266f1669fa4b2893ea11d0a0555f027884bd83aeabc7b2bd0"
-# Measured document deadline mitigation; source-only qualification.
+# Signed-lifetime admission repair; source-only qualification.
 # Exact reviewed context pins; runtime/native qualification remains separate.
 INPUTS = {
     "Dockerfile": "f9cd4e1d68c4e79fe818476aee9c9eec1754cd82d83631f3497754c5699f9230",
     "requirements-http.lock": "9a2d3ee2755958f1053729c36ed28f26290d830aee0f6abd4e0d9d24d2bc41a7",
     "ov_http/__init__.py": "3ab2b85dfb48c88b2cb8375956dbc4b619775b8332596357cbaf12f7cb9497dc",
     "ov_http/__main__.py": "645edce5c993b36ed74f42ef734d79d50ce0b836dbd4705b9ea8d59bce0bb6e1",
-    "ov_http/app.py": "5215697c1109c0f17116792376d663997b989c35ad521258ef21c78097b74b42",
-    "ov_http/auth.py": "8cbd85bd219b5e45f34e05cbfbcad56e03bf5361eeb90d458ae98dde473fd945",
+    "ov_http/app.py": "0434622d687c526d4147c2948f1921dc9e10a1866ee55c9c6d3e0274d0a8194c",
+    "ov_http/auth.py": "fe8bdd230e4308c74ff28bf03aa3eec166bf01f5dcf875451da4c2924f9e321a",
     "ov_http/config.py": "365ff98c9b4547adaded19279dea8b99cc98299ca269d6698be381302aab6c22",
     "ov_http/document_node.py": "19ee84a19076a52db67341176670b6b589cc6e940cfe95973ca0e5f010b2a1bf",
     "ov_http/document_write.py": "d74c4f570daf35f9ddf34badf9a4fae109b209136dcd47c975ede7ea6768e9ad",
-    "ov_http/mutations.py": "9d394b2816beec4ce24e815dedfd57085f9226ab9dceb1552cfb4559c9ea046c",
+    "ov_http/mutations.py": "11174f99d35aad518edf92ec42ed910334a1c593b0609ebbea8ca120b103f552",
     "ov_http/personal.py": "72ee79000d38d80740a0f938631e8c7ea7d785460db84acf31cead0df4ee8f28",
     "ov_http/reader.py": "0b2fe8b5cb3999d467ac32d6c822375d1bdfdaf17a13ebed6d3f737a2a1bdbd4",
 }

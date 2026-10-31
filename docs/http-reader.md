@@ -229,7 +229,34 @@ refresh lock. Reader calls retain a 20-second deadline. The authenticated HTTP g
 allows 135 seconds so real document writes can use a 130-second operation cap.
 This covers default, legacy-chunked and exact-directory-v2 writes. Move and reindex
 retain 70 seconds; dry-run and explicit file-deferred-v1 writes retain 20 seconds.
-All mutation caps are also minimized by token expiry.
+Real document writes require at least 135 seconds of remaining signed lifetime before
+any backend request. Otherwise the tool returns `Authorization lifetime insufficient; no mutation dispatched.`
+with `outcome=not_started`, `dispatched=false`, and `retry_safe=false`. Immediately before
+the document POST, remaining signed lifetime must cover the remaining monotonic operation
+budget plus five seconds. Preflight consumes both budgets; it does not require a fresh
+130 seconds at dispatch. Dry-run, explicit file-deferred-v1 and other mutation paths
+keep their existing expiry-minimized caps.
+
+For POSTs on a mutation-enabled server, a principal with write, remove or maintain
+authority and total signed lifetime of at least 160 seconds receives the existing
+invalid-token 401 when less than 145 seconds remain. This occurs after verification,
+before body consumption or application/backend execution. The challenge and response
+are unchanged. The gate logs only the fixed line `ov-http admission lifetime-refused`.
+Read-only and personal-only principals, GETs, disabled mutations and total signed
+lifetimes below 160 seconds are exempt. Write-capable principals' read, initialize
+and tools/list POSTs also refresh early. Non-refreshing clients therefore fail those
+calls up to 145 seconds earlier. The verified issued time is retained internally;
+it is not emitted, logged or included in the grant digest.
+
+Installed native client/helper equivalence to the inspected refresh-on-401, changed-bearer,
+single-resend sources remains UNPROVEN. Source fixtures cannot qualify that behavior.
+Parent-owned native proof must first demonstrate refresh with zero effects, then one
+authorized scratch write with a valid ACK and exactly one document POST. No 401 is
+introduced after application admission, dispatch, commit or UNKNOWN; no backend mutation
+is retried. This source repair prevents a known under-budget admission pattern and does
+not prove the incident cause. Caller disconnect, transport failure and insufficient
+remaining operation time for the full POST read allowance remain possible.
+
 See full-interactive-source.md for the exact long-I/O endpoints and remaining limits. The
 entrypoint limits concurrent connections/tasks to 64. A call has at most 128 backend requests, 256 traversal nodes,
 12 levels, 256 children per listing, 256 KiB per upstream response and 1 MiB of

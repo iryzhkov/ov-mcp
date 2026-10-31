@@ -119,6 +119,7 @@ class Principal:
     personal_account: str = ""
     personal_user: str = ""
     personal_actions: tuple[str, ...] = ()
+    issued: int = 0
 
     def canonical(self, uri: str) -> str:
         if self.uri_policy == LEGACY_URI_POLICY:
@@ -320,7 +321,7 @@ class Verifier:
             digest = hashlib.sha256(json.dumps(
                 authority, separators=(",", ":")).encode()).hexdigest()
             return Principal(subject, roots, expires, digest, actions, uri_policy,
-                             *(personal or ("", "", ())))
+                             *(personal or ("", "", ())), issued=issued)
         except (ValueError, TypeError, KeyError, RecursionError, jwt.PyJWTError,
                 httpx.HTTPError, TimeoutError):
             raise Refused() from None

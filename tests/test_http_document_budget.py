@@ -11,7 +11,7 @@ from starlette.routing import Route
 
 from ov_http.app import SecurityGate
 from ov_http.auth import Principal
-from ov_http.mutations import Mutations, call_mutation
+from ov_http.mutations import LIFETIME_NOT_STARTED, Mutations, call_mutation
 from ov_http.reader import Backend
 from test_http_acceptance import serving
 from test_http_document_write import ACTIONS, Documents, args, invoke
@@ -36,7 +36,7 @@ async def test_real_document_response_crosses_former_sixty_second_deadline():
     app = Starlette(routes=[Route("/{path:path}", endpoint, methods=["GET", "POST"])])
     async with serving(app) as port, httpx.AsyncClient(timeout=10, trust_env=False) as client:
         cfg = replace(config(), backend_url=f"http://127.0.0.1:{port}/api/v1")
-        principal = Principal("fixture", (ROOT,), int(time.time()) + 120,
+        principal = Principal("fixture", (ROOT,), int(time.time()) + 200,
                               "fixture-grants", ACTIONS, cfg.uri_policy)
         backend = Backend(cfg, principal, client)
         start = time.monotonic()
@@ -111,8 +111,12 @@ async def test_cap_selection_still_minimized_by_expiry(monkeypatch, name, change
             "uri": DOC if name == "memory_reindex" else A + "/new",
             "from_uri": DOC, "to_uri": A + "/moved.md",
         }
-        await call_mutation(backend, name, arguments, {})
-    assert selected == [min(cap, lifetime)]
+        answer, failed = await call_mutation(backend, name, arguments, {})
+    if cap == 130 and lifetime < 135:
+        assert failed and answer == LIFETIME_NOT_STARTED
+        assert selected == [] and backend.requests == 0
+    else:
+        assert selected == [min(cap, lifetime)]
 
 
 @pytest.mark.asyncio
@@ -255,11 +259,13 @@ async def test_write_path_timeout_selection(storage, dry_run, post_path):
 
 
 @pytest.mark.asyncio
-async def test_document_expiry_during_post_cancels_without_retry():
+async def test_document_operation_timeout_during_post_cancels_without_retry(monkeypatch):
     engine = Documents()
     posted = []
     cancelled = []
-    async with invoke(engine, expires=time.time() + 0.2) as (run, _, backend):
+    # Keep full signed reserve; shorten only the synthetic operation deadline.
+    monkeypatch.setattr("ov_http.mutations.DOCUMENT_WRITE_SECONDS", 0.2)
+    async with invoke(engine, expires=time.time() + 200) as (run, _, backend):
         original = backend.client.send
 
         async def send(request, **kwargs):
@@ -277,3 +283,59 @@ async def test_document_expiry_during_post_cancels_without_retry():
             answer, failed = await run(**args(verify=False))
     assert failed and answer["outcome"] == "unknown" and answer["retry_safe"] is False
     assert len(posted) == 1 and cancelled == [True] and not engine.effects
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("storage", [None, "legacy-chunked", "exact-directory-v2"])
+@pytest.mark.parametrize("lifetime", [134, 135])
+async def test_document_signed_reserve_before_any_backend_request(monkeypatch, storage, lifetime):
+    now = time.time()
+    monkeypatch.setattr("ov_http.mutations.time.time", lambda: now)
+    engine, state = Documents(), {}
+    changes = {"verify": False}
+    if storage:
+        changes["storage"] = storage
+    if storage == "exact-directory-v2":
+        engine.dirs.add(A + "/new.md")
+        engine.files[A + "/new.md/old.md"] = b"old"
+        engine.document_contract = {"contract": "resources-document-write", "version": 2}
+        changes["overwrite"] = True
+    async with invoke(engine, expires=now + lifetime) as (_, _, backend):
+        answer, failed = await call_mutation(backend, "memory_write", args(**changes), state)
+    if lifetime == 134:
+        assert failed and answer == LIFETIME_NOT_STARTED
+        assert backend.requests == 0 and not engine.calls and not engine.effects
+        assert not state.get("dispatched")
+    else:
+        assert not failed, answer
+        assert len(engine.effects) == 1 and state["dispatched"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("advance_both", [False, True])
+@pytest.mark.parametrize("lifetime", [140, 200])
+async def test_prepost_reserve_uses_remaining_monotonic_budget(monkeypatch, advance_both, lifetime):
+    # 140 - 20 leaves only 120 seconds: a fresh 130-second demand would fail.
+    now, elapsed = time.time(), [0]
+    loop = asyncio.get_running_loop()
+    original_time = loop.time
+    monkeypatch.setattr(loop, "time", lambda: original_time() + elapsed[0])
+    wall = [now]
+    monkeypatch.setattr("ov_http.mutations.time.time", lambda: wall[0])
+    engine, state = Documents(), {}
+
+    def preflight():
+        wall[0] += 20 if advance_both else lifetime - 120
+        if advance_both:
+            elapsed[0] += 20
+
+    engine.document_contract_hook = preflight
+    async with invoke(engine, expires=now + lifetime) as (_, _, backend):
+        answer, failed = await call_mutation(backend, "memory_write", args(verify=False), state)
+    posts = [c for c in engine.calls if c[0] == "POST"]
+    if advance_both:
+        assert not failed, answer
+        assert answer["outcome"] == "committed" and len(posts) == len(engine.effects) == 1
+    else:
+        assert failed and answer == LIFETIME_NOT_STARTED
+        assert not posts and not engine.effects and not state.get("dispatched")
