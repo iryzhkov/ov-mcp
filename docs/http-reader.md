@@ -18,7 +18,17 @@ safe error plus a fixed preflight stage and category. Categories can identify
 allowlisted document-node protocol failures without exposing backend messages,
 private paths, details or credentials. Unknown errors remain unavailable.
 This is diagnostic evidence, not permission to retry or proof of indexing.
-Default writes and their commit/unknown handling are unchanged.
+Default writes retain their commit/unknown handling. Default document replacement
+privately inventories exact immediate file `.relations.json` entries using
+their authorized resource parents, with at most 128 total nodes, 12 directory
+levels and 1024 UTF-8 bytes per physical source and backup URI. No metadata
+paths or bodies appear in responses; other tools keep their existing refusals.
+
+The existing closed categories are `passed`, `unavailable`,
+`invalid_document_uri`, `directory_fragment_controls`,
+`residual_index_state`, `context_inventory_incomplete`, `context_limit` and
+`document_alias`. This bounded change adds no inventory-specific categories;
+inventory refusals remain `unavailable`.
 
 ## Runtime interface
 

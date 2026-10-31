@@ -21,8 +21,8 @@ INPUTS = {
     "ov_http/app.py": "3a87ebcefd76eefde9e7e3c44719846e5489d6750e5850b0259b08ea38c9db67",
     "ov_http/auth.py": "8cbd85bd219b5e45f34e05cbfbcad56e03bf5361eeb90d458ae98dde473fd945",
     "ov_http/config.py": "365ff98c9b4547adaded19279dea8b99cc98299ca269d6698be381302aab6c22",
-    "ov_http/document_write.py": "b006325bac33c1cc8d2fa4e75016f090598f77e6590c3086de010d4675da7de5",
-    "ov_http/mutations.py": "91e233488face680412a7bd2f9680f26a72ac4f42831873c0a4995159aa1e68c",
+    "ov_http/document_write.py": "f0745b58e8d6669235fc2d76399e39cc47944e5f3bd01f0300bc7646637472c3",
+    "ov_http/mutations.py": "5c89c30ce641277e2461ae78f5db49f9789ab328df2a1489d7dfcc36bb31f53a",
     "ov_http/personal.py": "72ee79000d38d80740a0f938631e8c7ea7d785460db84acf31cead0df4ee8f28",
     "ov_http/reader.py": "aede8416bdcb756b6b5e709f7ce63af66a5f5d40975c680f3d28254cbe7dfe88",
 }

@@ -74,6 +74,7 @@ class Mutations:
         self.p = backend.principal
         self.state = {} if state is None else state
         self.kinds = {}
+        self.metadata_owner = {}
 
     def authorize(self, action, *uris, strict=False):
         self.p.require_action(action, *uris)
@@ -186,7 +187,7 @@ class Mutations:
             unsupported("An existing authorized parent directory is required.")
         return parent
 
-    async def subtree(self, uri, action):
+    async def subtree(self, uri, action, *, relations_sidecar=False):
         """Validate every original row, including hidden names and denied placeholders."""
         nodes, pending = [uri], [(uri, 0)]
         while pending:
@@ -207,6 +208,20 @@ class Mutations:
                     raise Refused()
                 child = row.get("uri")
                 if not isinstance(child, str):
+                    raise Refused()
+                if relations_sidecar and child == parent + "/.relations.json":
+                    # Private physical metadata is preserved only by document writes.
+                    # The traversed parent is already canonical and authorized.
+                    if row["isDir"] is not False or len(child.encode("utf-8")) > 1024 or child in nodes:
+                        raise Refused()
+                    nodes.append(child)
+                    self.kinds[child] = False
+                    self.metadata_owner[child] = parent
+                    if len(nodes) > 128:
+                        raise BudgetExhausted()
+                    continue
+                if (relations_sidecar and child.rsplit("/", 1)[-1].startswith(".")
+                        and child.rsplit("/", 1)[-1] not in {".abstract.md", ".overview.md"}):
                     raise Refused()
                 self.p.require_action(action, child)
                 if (not contains(parent, child) or child == parent
