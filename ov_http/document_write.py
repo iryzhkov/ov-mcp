@@ -418,11 +418,12 @@ class DocumentWriter:
             self.m.state["preflight_stage"] = "subtree"
             checks += self.checks(generated, ("remove",))
             paths = (
-                await self.m.subtree(self.target, "read")
+                await self.m.subtree(self.target, "read", relations_sidecar=True)
                 if expected["kind"] == "directory"
                 else [self.target]
             )
-            checks += self.checks(paths, ("read", "write", "maintain", "remove"))
+            owners = [self.m.metadata_owner.get(path, path) for path in paths]
+            checks += self.checks(owners, ("read", "write", "maintain", "remove"))
             self.m.state["preflight_stage"] = "backup"
             archive = (
                 to
@@ -442,7 +443,14 @@ class DocumentWriter:
                 self.backup + "/.abstract.md",
                 self.backup + "/.overview.md",
             ]
-            backup_paths += [self.backup + path[len(self.target) :] for path in paths]
+            for path in paths:
+                # Bound the physical destination even when authority is checked
+                # against its canonical resource owner rather than its sidecar.
+                physical = self.backup + path[len(self.target) :]
+                if len(physical.encode("utf-8")) > 1024:
+                    raise Refused()
+                owner = self.m.metadata_owner.get(path, path)
+                backup_paths.append(self.backup + owner[len(self.target) :])
             checks += self.checks([archive, *backup_paths], actions)
             checks += self.m.ancestor_checks(self.backup)
             # No archive-parent auto-creation or absence inferred from stat errors.

@@ -59,6 +59,24 @@ The UTF-8 fixture tests cover exact byte bounds, static pages over 256 entries i
 
 The new SDK tests use a synthetic scoped engine with higher-ranked foreign-store candidates. They demonstrate adapter request and response checks, not real vector execution, production ACL or native interactive acceptance. Exact-image package proof and eventual native acceptance are separate evidence.
 
+## Private document metadata preservation, source only
+
+Only default document-write replacement inventory admits the exact immediate
+`.relations.json` file beneath each already canonical, authorized directory.
+Original row type and denied-row checks still run first. The entry must be a
+file, unique, and at most 1024 UTF-8 bytes as a full physical URI; it consumes
+the existing 128-node inventory budget. Read/write/maintain/remove authority
+uses its canonical resource parent, including the corresponding backup parent.
+The physical backup suffix is retained and independently bounded to 1024 bytes.
+Typed tree snapshots and backup CAS continue to cover the metadata bytes; no
+sidecar body or URI is projected in public responses or added to the payload.
+
+This private preservation exception adds no public argument or direct metadata
+access. Reader, browse, move, reindex, remove, watch controls and locks retain
+existing behavior. Document replacement inventory additionally refuses unknown
+dot files and directories; the baseline admitted some of these names. It qualifies adapter source only;
+the live preflight cause remains unproven and no live note was overwritten.
+
 ## Default-off document mutation adapter, source only
 
 The independent `mutation_profile = "resources-document-mutations-v1"` selector requires the resources read profile and its existing namespace ceiling. Omitting it preserves the old 11-tool catalog, schemas, canary reader deadlines and disabled/legacy profiles. Selecting it exposes eight additional public names. Catalog size is not functional parity. This batch neither activates the profile nor changes `server.py`, issuer grants, clients, credentials or native artifacts.
