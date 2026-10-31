@@ -72,8 +72,9 @@ Typed tree snapshots and backup CAS continue to cover the metadata bytes; no
 sidecar body or URI is projected in public responses or added to the payload.
 
 This private preservation exception adds no public argument or direct metadata
-access. Reader, browse, move, reindex, remove, watch controls, locks and unknown
-hidden names retain their existing refusals. It qualifies adapter source only;
+access. Reader, browse, move, reindex, remove, watch controls and locks retain
+existing behavior. Document replacement inventory additionally refuses unknown
+dot files and directories; the baseline admitted some of these names. It qualifies adapter source only;
 the live preflight cause remains unproven and no live note was overwritten.
 
 ## Default-off document mutation adapter, source only
