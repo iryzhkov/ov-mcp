@@ -30,6 +30,27 @@ The existing closed categories are `passed`, `unavailable`,
 `document_alias`. This bounded change adds no inventory-specific categories;
 inventory refusals remain `unavailable`.
 
+## Recovery revision observations
+
+HTTP `memory_stat(uri, include_revision=true)` returns only `{"uri": uri, "node": descriptor}`
+from the existing `GET /resources/document-node` endpoint. It requires read authority
+before and after the GET and retains the reader's time, request and byte limits.
+It works without mutation authority or the mutation profile. Omitted or false keeps
+the ordinary stat response, including recursive directory size and part counts.
+
+The descriptor is an existing typed directory `kind` plus `tree_revision`, or a
+file `kind` plus `content_sha256` and `control_revision`. It uses the writer's
+closed validator. Extra fields, foreign response URIs, absent nodes and malformed
+revisions refuse. No content, filenames beneath the requested URI, private control
+paths or backup paths are returned. The revision is supplied by the backend,
+never inferred from displayed text. Recursive stats are omitted in this mode to
+avoid combining independently observed snapshots.
+
+A recovery caller can compare the full typed node across two observations around
+its held parsed note. An unchanged observation is evidence only for that node at
+those observation times. Refusal, unknown or not-found is never proof of absence,
+and this read cannot clear an unknown hold or authorize replay of a write.
+
 ## Runtime interface
 
 Use Python 3.13 and a dedicated environment with `requirements-http.lock`.
