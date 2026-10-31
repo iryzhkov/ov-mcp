@@ -18,7 +18,7 @@ CONTRACT_PATH = "/fs/resources-only/mutation-contract"
 CONTRACT = {"contract": "resources-document-mutations", "version": 1}
 LONG_MUTATION_SECONDS = 70
 LONG_MUTATION_NAMES = frozenset({"memory_mv", "memory_reindex"})
-LONG_MUTATION_ENDPOINTS = frozenset({"/fs/mv", "/content/reindex"})
+LONG_MUTATION_ENDPOINTS = frozenset({"/fs/mv", "/content/reindex", "/resources/document-write"})
 UNKNOWN = {"error": "Outcome unknown after dispatch. Do not retry automatically.",
            "outcome": "unknown", "retry_safe": False}
 URI = {"type": "string", "minLength": 1, "maxLength": 1024}
@@ -98,8 +98,8 @@ class Mutations:
         if effect:
             self.state["dispatched"] = True
             if endpoint in LONG_MUTATION_ENDPOINTS:
-                # A measured parent-refresh move took 36.5 seconds. Keep the
-                # observation finite and below the authority-bound outer cap.
+                # Allow bounded observation of slow native commits, below the
+                # authority-bound outer cap. This is no completion guarantee.
                 kwargs["timeout"] = httpx.Timeout(60, connect=5, pool=5)
         async with b.client.stream(method, b.config.backend_url + endpoint, **kwargs) as response:
             if response.headers.get("content-encoding", "identity") != "identity":
@@ -543,7 +543,10 @@ async def call_mutation(backend, name, arguments, state):
 async def _call_mutation(backend, name, arguments, state):
     operation = Mutations(backend, state)
     try:
-        cap = LONG_MUTATION_SECONDS if name in LONG_MUTATION_NAMES else 20
+        document_write = (name == "memory_write"
+                          and arguments.get("storage", "legacy-chunked") == "legacy-chunked"
+                          and arguments.get("dry_run") is not True)
+        cap = LONG_MUTATION_SECONDS if name in LONG_MUTATION_NAMES or document_write else 20
         remaining = min(cap, backend.principal.expires - time.time())
         if remaining <= 0:
             raise Refused()

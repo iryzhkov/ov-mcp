@@ -204,8 +204,11 @@ document could make the name ambiguous. Explicit URI links and backlinks from
 fully read documents can still be returned with `truncated: true`.
 
 Authentication has a five-second total deadline, including any wait for the JWKS
-refresh lock. A call has a 20-second deadline inside a 25-second authenticated
-HTTP request deadline. The
+refresh lock. Reader calls have a 20-second deadline inside a 75-second authenticated
+HTTP request deadline. The opt-in mutation profile uses a 70-second operation cap
+for default document writes, moves and reindex; dry-run and explicit file-deferred-v1
+writes retain 20 seconds. All mutation caps are also minimized by token expiry.
+See full-interactive-source.md for the exact long-I/O endpoints and remaining limits. The
 entrypoint limits concurrent connections/tasks to 64. A call has at most 128 backend requests, 256 traversal nodes,
 12 levels, 256 children per listing, 256 KiB per upstream response and 1 MiB of
 aggregate uncompressed JSON response-body data. Each request reserves one full 256 KiB
@@ -223,8 +226,9 @@ upstream and backend failures return the same safe tool error. This is response
 equivalence, not a timing-equivalence claim. Cancellation propagates through
 the HTTP disconnect and async HTTP calls. A later MCP cancellation notification
 cannot locate an earlier POST in the SDK's stateless mode; clients must close the
-in-flight HTTP request for immediate cancellation. All calls still have the
-20-second deadline.
+in-flight HTTP request for immediate cancellation. Reader calls retain the
+20-second deadline. A disconnected mutation may still commit in the backend;
+unknown outcomes must not be replayed automatically.
 
 ## Qualification boundary
 
