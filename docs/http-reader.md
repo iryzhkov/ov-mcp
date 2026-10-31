@@ -225,10 +225,11 @@ document could make the name ambiguous. Explicit URI links and backlinks from
 fully read documents can still be returned with `truncated: true`.
 
 Authentication has a five-second total deadline, including any wait for the JWKS
-refresh lock. Reader calls have a 20-second deadline inside a 75-second authenticated
-HTTP request deadline. The opt-in mutation profile uses a 70-second operation cap
-for default document writes, moves and reindex; dry-run and explicit file-deferred-v1
-writes retain 20 seconds. All mutation caps are also minimized by token expiry.
+refresh lock. Reader calls retain a 20-second deadline. The authenticated HTTP gate
+allows 135 seconds so real document writes can use a 130-second operation cap.
+This covers default, legacy-chunked and exact-directory-v2 writes. Move and reindex
+retain 70 seconds; dry-run and explicit file-deferred-v1 writes retain 20 seconds.
+All mutation caps are also minimized by token expiry.
 See full-interactive-source.md for the exact long-I/O endpoints and remaining limits. The
 entrypoint limits concurrent connections/tasks to 64. A call has at most 128 backend requests, 256 traversal nodes,
 12 levels, 256 children per listing, 256 KiB per upstream response and 1 MiB of

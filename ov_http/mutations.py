@@ -16,9 +16,10 @@ from .reader import Backend, BudgetExhausted, DOC_EXTS
 PROFILE = "resources-document-mutations-v1"
 CONTRACT_PATH = "/fs/resources-only/mutation-contract"
 CONTRACT = {"contract": "resources-document-mutations", "version": 1}
+DOCUMENT_WRITE_SECONDS = 130
 LONG_MUTATION_SECONDS = 70
 LONG_MUTATION_NAMES = frozenset({"memory_mv", "memory_reindex"})
-LONG_MUTATION_ENDPOINTS = frozenset({"/fs/mv", "/content/reindex", "/resources/document-write"})
+LONG_MUTATION_ENDPOINTS = frozenset({"/fs/mv", "/content/reindex"})
 UNKNOWN = {"error": "Outcome unknown after dispatch. Do not retry automatically.",
            "outcome": "unknown", "retry_safe": False}
 URI = {"type": "string", "minLength": 1, "maxLength": 1024}
@@ -98,7 +99,10 @@ class Mutations:
         b.requests += 1
         if effect:
             self.state["dispatched"] = True
-            if endpoint in LONG_MUTATION_ENDPOINTS:
+            if method == "POST" and endpoint == "/resources/document-write":
+                # Measured native preparation exceeded 60s; finite headroom only.
+                kwargs["timeout"] = httpx.Timeout(120, connect=5, pool=5, write=5)
+            elif endpoint in LONG_MUTATION_ENDPOINTS:
                 # Allow bounded observation of slow native commits, below the
                 # authority-bound outer cap. This is no completion guarantee.
                 kwargs["timeout"] = httpx.Timeout(60, connect=5, pool=5)
@@ -547,7 +551,7 @@ async def _call_mutation(backend, name, arguments, state):
         document_write = (name == "memory_write"
                           and arguments.get("storage", "legacy-chunked") in {"legacy-chunked", "exact-directory-v2"}
                           and arguments.get("dry_run") is not True)
-        cap = LONG_MUTATION_SECONDS if name in LONG_MUTATION_NAMES or document_write else 20
+        cap = DOCUMENT_WRITE_SECONDS if document_write else LONG_MUTATION_SECONDS if name in LONG_MUTATION_NAMES else 20
         remaining = min(cap, backend.principal.expires - time.time())
         if remaining <= 0:
             raise Refused()
