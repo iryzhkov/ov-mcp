@@ -1,6 +1,39 @@
 # Full interactive HTTP source preparation
 
-The manual `HTTP image artifact` workflow builds the unchanged Dockerfile on `ubuntu-24.04` from the workflow run's exact commit, using the reviewed Python 3.13 base digest and only the eleven hash-pinned context files, including the default-off personal tools module. Its run-ID/commit artifact contains a loadable `image.tar`, SHA256, source/tree/input hashes, base manifest bytes and descriptors, verified saved config/layer custody, image ID/Config/RootFS, build metadata, versions and command statuses; it expires after seven days and must total less than 400 MiB. The script uses the runner's installed Docker/BuildKit with `buildx --load`, without per-build resource flags, and records tool/runner versions; the 15-minute hosted job and runner bounds do not satisfy or replace the separate homelab 2 CPU/2 GiB gate. No output distribution digest is claimed without distribution manifest bytes, and this artifact workflow does not deploy, import, start the application or establish live acceptance. Hosted build, upload and actual size acceptance remain pending until the root publishes and manually dispatches the workflow.
+## Exact directories at original URIs, source only
+
+Opt in with `memory_write(storage="exact-directory-v2", overwrite=true)` for an
+existing resource directory. The target remains `to/filename`; do not combine
+this mode with `verbatim=true`. Default writes and legacy .verbatim targets
+retain their behavior. Files and absent targets refuse this explicit mode.
+
+The adapter requests the closed document contract with `version=2` and requires
+exactly `{"contract":"resources-document-write","version":2}` before POST.
+An old backend returning v1, extra capability fields or an unavailable contract
+refuses without dispatch. The request carries `contract_version=2` and
+`representation="exact_directory"`; old backend closed schemas reject it.
+New backends require both v2 and a directory expectation for this representation.
+The default contract endpoint still returns v1 for existing clients.
+
+Publication reuses owned verbatim artifacts and byte guards at `0001/0000.md`,
+typed directory CAS including private sidecars, subtree ACLs, protected backups,
+leases and control guards. No grant, public URI rule or personal scope expands.
+Use `memory_read(uri=original_uri, storage="exact-directory-v2", limit=2000)`
+for the explicit raw roundtrip. It requires the exact single-content-member shape
+among caller-visible members and preserves whitespace; normal read assembly is unchanged. Existing read size,
+line, traversal and output caps still apply. Write verification uses that same
+raw reader between typed node observations, without a linearizability claim.
+
+`input_sha256` hashes the UTF-8 input bytes. It is not a digest of a parsed
+document, assembled legacy read, directory tree revision or indexing completion.
+Character counts differ from UTF-8 byte counts. The existing 1 MiB byte guard
+still applies. No timeout is raised: backend capture, handoff and enqueue after
+content commit can still exceed existing observation budgets. Unknown outcomes
+must not be replayed. Native dependency qualification, artifact binding and live
+activation remain root-owned; this change does not clear the curator hold.
+
+
+The manual `HTTP image artifact` workflow builds the unchanged Dockerfile on `ubuntu-24.04` from the workflow run's exact commit, using the reviewed Python 3.13 base digest and only the twelve hash-pinned context files, including the default-off personal tools module. Its run-ID/commit artifact contains a loadable `image.tar`, SHA256, source/tree/input hashes, base manifest bytes and descriptors, verified saved config/layer custody, image ID/Config/RootFS, build metadata, versions and command statuses; it expires after seven days and must total less than 400 MiB. The script uses the runner's installed Docker/BuildKit with `buildx --load`, without per-build resource flags, and records tool/runner versions; the 15-minute hosted job and runner bounds do not satisfy or replace the separate homelab 2 CPU/2 GiB gate. No output distribution digest is claimed without distribution manifest bytes, and this artifact workflow does not deploy, import, start the application or establish live acceptance. Hosted build, upload and actual size acceptance remain pending until the root publishes and manually dispatches the workflow.
 
 This branch is not a deployed full-parity release. The live bounded reader remains unchanged. Mutations, safe orphan repair, qualified backend artifacts and four native host/provider checks are still required before replacing stdio.
 

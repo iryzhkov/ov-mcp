@@ -8,6 +8,7 @@ import httpx
 from .auth import (Principal, Refused, BROWSE_METADATA_NAMES, contains,
                    storage_internal_name, strict_json)
 from .config import Config, SEMANTIC_PROFILE, RESOURCES_PROFILE
+from .document_node import NODE_PATH, node
 
 SAFE_ERROR = "Resource unavailable."
 DOC_EXTS = (".md", ".txt", ".yaml", ".yml", ".json", ".toml", ".rst", ".pdf", ".verbatim")
@@ -252,13 +253,21 @@ class Reader:
             truncated = True
         return sorted(nodes, key=lambda n: natural(n["uri"])), truncated
 
-    async def assemble(self, uri: str):
+    async def assemble(self, uri: str, *, exact_directory: bool = False):
         st = await self.backend.stat(uri)
         if not st["isDir"]:
+            if exact_directory:
+                raise Refused()
             return await self.backend.text(uri), [uri]
         nodes, truncated = await self.walk(uri, atomic=True)
         if truncated:
             raise BudgetExhausted()
+        if exact_directory:
+            files = [n["uri"] for n in nodes if not n["isDir"]
+                     and not n["uri"].rsplit("/", 1)[-1].startswith(".")]
+            if files != [uri + "/0001/0000.md"]:
+                raise Refused()
+            return await self.backend.text(files[0]), files
         sources, chunks = [], []
         for node in nodes:
             part = node["uri"]
@@ -281,8 +290,11 @@ class Reader:
             text += (separator if text else "") + chunk
         return text, sources
 
-    async def read(self, uri: str, offset: int = 0, limit: int = 500, parts: bool = False):
-        text, sources = await self.assemble(uri)
+    async def read(self, uri: str, offset: int = 0, limit: int = 500, parts: bool = False,
+                   storage: str = "legacy-chunked"):
+        if storage not in {"legacy-chunked", "exact-directory-v2"}:
+            raise Refused()
+        text, sources = await self.assemble(uri, exact_directory=storage == "exact-directory-v2")
         lines = text.split("\n")
         selected = "\n".join(lines[offset:offset + limit])
         truncated = offset + limit < len(lines) or len(selected) > 24000
@@ -340,7 +352,18 @@ class Reader:
                 "depth_limit": depth if recursive else 1,
                 "pagination": "best effort; concurrent edits may repeat or omit paths"}
 
-    async def stat(self, uri: str):
+    async def stat(self, uri: str, include_revision: bool = False):
+        if type(include_revision) is not bool:
+            raise Refused()
+        if include_revision:
+            # One typed snapshot only; do not combine it with recursive stats.
+            self.principal.require_action("read", uri)
+            value = await self.backend._get(NODE_PATH, uri)
+            self.principal.require_action("read", uri)
+            if (not isinstance(value, dict) or set(value) != {"uri", "node"}
+                    or value["uri"] != uri):
+                raise Refused()
+            return {"uri": uri, "node": node(value["node"], absent=False)}
         result = await self.backend.stat(uri)
         if result["isDir"]:
             nodes, cut = await self.walk(uri)

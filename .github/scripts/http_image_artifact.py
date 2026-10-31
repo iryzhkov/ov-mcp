@@ -11,20 +11,21 @@ import tarfile
 
 BASE = "docker.io/library/python:3.13-slim-trixie@sha256:fea139ecc0ab98360ead50b38872df6d42cf3503bec83215461224cbef0c8269"
 BASE_CONFIG = "sha256:174c59289bb55d8266f1669fa4b2893ea11d0a0555f027884bd83aeabc7b2bd0"
-# Document-write observation budget repair; source-only qualification.
+# Read-only typed recovery observations; source-only qualification.
 # Exact reviewed context pins; runtime/native qualification remains separate.
 INPUTS = {
     "Dockerfile": "f9cd4e1d68c4e79fe818476aee9c9eec1754cd82d83631f3497754c5699f9230",
     "requirements-http.lock": "9a2d3ee2755958f1053729c36ed28f26290d830aee0f6abd4e0d9d24d2bc41a7",
     "ov_http/__init__.py": "3ab2b85dfb48c88b2cb8375956dbc4b619775b8332596357cbaf12f7cb9497dc",
     "ov_http/__main__.py": "645edce5c993b36ed74f42ef734d79d50ce0b836dbd4705b9ea8d59bce0bb6e1",
-    "ov_http/app.py": "3a87ebcefd76eefde9e7e3c44719846e5489d6750e5850b0259b08ea38c9db67",
+    "ov_http/app.py": "294fb7dffeec1a2723c1795c6ac2e708130fd1a7f0c3cdc32b78b0776edee5af",
     "ov_http/auth.py": "8cbd85bd219b5e45f34e05cbfbcad56e03bf5361eeb90d458ae98dde473fd945",
     "ov_http/config.py": "365ff98c9b4547adaded19279dea8b99cc98299ca269d6698be381302aab6c22",
-    "ov_http/document_write.py": "f0745b58e8d6669235fc2d76399e39cc47944e5f3bd01f0300bc7646637472c3",
-    "ov_http/mutations.py": "657381e5baeba903a59a2161b001ca00f2b6b33c077e21d4ba85d459026a5550",
+    "ov_http/document_node.py": "19ee84a19076a52db67341176670b6b589cc6e940cfe95973ca0e5f010b2a1bf",
+    "ov_http/document_write.py": "d74c4f570daf35f9ddf34badf9a4fae109b209136dcd47c975ede7ea6768e9ad",
+    "ov_http/mutations.py": "cadaf95f9c1e98453304284abd6d5ffdd75eb86bea91b45b9b2a8713b3102523",
     "ov_http/personal.py": "72ee79000d38d80740a0f938631e8c7ea7d785460db84acf31cead0df4ee8f28",
-    "ov_http/reader.py": "aede8416bdcb756b6b5e709f7ce63af66a5f5d40975c680f3d28254cbe7dfe88",
+    "ov_http/reader.py": "0b2fe8b5cb3999d467ac32d6c822375d1bdfdaf17a13ebed6d3f737a2a1bdbd4",
 }
 OUT = Path("http-image-artifact")
 CONTEXT = Path(".scratch/context")
