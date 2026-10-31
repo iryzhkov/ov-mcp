@@ -780,6 +780,24 @@ async def test_processing_acceptance_never_claims_revision_index_completion(stat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("verify", [False, True])
+async def test_verified_early_ack_is_committed_not_retryable(verify):
+    engine = Documents()
+    engine.processing = "unobserved"
+    engine.ack_changes = {"cleanup_state": "unknown"}
+    async with invoke(engine) as (run, _, _):
+        answer, failed = await run(**args(filename="old.md", overwrite=True, verify=verify))
+    assert not failed
+    assert answer["outcome"] == answer["content_state"] == "committed"
+    assert answer["retry_safe"] is False
+    assert answer["processing_state"] == "unobserved"
+    assert answer["indexing"] == "not_revision_bound"
+    assert answer["verification"]["status"] == ("exact" if verify else "not_requested")
+    assert engine.files[answer["backup"]["uri"]] == b"old\n"
+    assert len(engine.effects) == 1
+
+
+@pytest.mark.asyncio
 async def test_contract_not_cached_and_input_limits_precede_io():
     engine = Documents()
     async with invoke(engine) as (run, _, _):
