@@ -330,7 +330,7 @@ async def test_mkdir_generated_path_and_resources_only_delete_dry_run_and_prune(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("poison", [
     {"uri": B + "/foreign.md", "isDir": False},
-    {"uri": A + "/folder/.relations.json", "isDir": False},
+    {"uri": A + "/folder/.relations.json", "isDir": True},
     {"uri": A + "/folder/.path.ovlock", "isDir": False},
     {"uri": A + "/folder/denied.md", "isDir": False, "access": "denied"},
     {"uri": A + "/folder/nested/x.md", "isDir": False},
