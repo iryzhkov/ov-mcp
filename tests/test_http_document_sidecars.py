@@ -66,7 +66,8 @@ async def test_document_sidecars_preserved_with_owner_authority_only(dry_run, mo
     "hidden", "lock", "watch", "malformed", "budget", "physical_length",
     "backup_length", "missing_remove", "uncovered_parent",
 ])
-async def test_bad_inventory_or_authority_never_dispatches(fault, dry_run):
+@pytest.mark.parametrize("operation", ["memory_write", "memory_mv", "memory_rm"])
+async def test_bad_inventory_or_authority_never_dispatches(fault, dry_run, operation):
     engine = tree()
     options = {}
     if fault == "directory":
@@ -105,8 +106,21 @@ async def test_bad_inventory_or_authority_never_dispatches(fault, dry_run):
     elif fault == "uncovered_parent":
         options["roots"] = (TARGET,)
     before = (dict(engine.files), set(engine.dirs))
-    async with invoke(engine, **options) as (run, _, _):
-        answer, failed = await run(**args(overwrite=True, verify=False, dry_run=dry_run))
+    # Move has no generated backup path; that document-write-only bound is
+    # covered by the original case. Remove only requires remove authority.
+    if operation != "memory_write" and fault == "backup_length":
+        return
+    if operation == "memory_rm" and fault == "uncovered_parent":
+        return
+    async with invoke(engine, **options) as (run, _, backend):
+        if operation == "memory_write":
+            answer, failed = await run(**args(overwrite=True, verify=False, dry_run=dry_run))
+        elif operation == "memory_mv":
+            answer, failed = await call_mutation(backend, operation,
+                {"from_uri": TARGET, "to_uri": A + "/moved.md"}, {})
+        else:
+            answer, failed = await call_mutation(backend, operation,
+                {"uri": TARGET, "recursive": True, "dry_run": dry_run}, {})
     assert failed and answer["outcome"] == "not_started"
     assert (engine.files, engine.dirs) == before
     assert not engine.effects and not engine.backups
@@ -116,10 +130,7 @@ async def test_bad_inventory_or_authority_never_dispatches(fault, dry_run):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation,arguments", [
-    ("memory_mv", {"from_uri": TARGET, "to_uri": A + "/moved.md"}),
     ("memory_reindex", {"uri": TARGET}),
-    ("memory_rm", {"uri": TARGET, "recursive": True}),
-    ("memory_rm", {"uri": TARGET, "recursive": True, "dry_run": True}),
 ])
 async def test_ordinary_mutations_still_refuse_sidecars(operation, arguments):
     engine = tree()

@@ -129,7 +129,7 @@ async def test_move_exact_generated_ancestor_sidecar_bound_refuses_before_io():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("poison", [
     {"uri": B + "/foreign.md", "isDir": False},
-    {"uri": A + "/folder/.relations.json", "isDir": False},
+    {"uri": A + "/folder/.relations.json", "isDir": True},
     {"uri": A + "/folder/.path.ovlock", "isDir": False},
     {"uri": A + "/folder/denied.md", "isDir": False, "access": "denied"},
 ])

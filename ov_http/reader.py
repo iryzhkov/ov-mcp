@@ -443,6 +443,21 @@ class Reader:
                                                  "abstract": hit["abstract"], "matching_parts": 0})
             entry["matching_parts"] += 1
         values = list(matches.values())
+        if not include_archived:
+            # Summaries nominate candidates; only an explicit source title hides a
+            # note. Current catalogs may legitimately discuss superseded tools.
+            checked, current = {}, []
+            for entry in values:
+                owner = document(entry["uri"], self.principal)
+                if owner not in checked:
+                    checked[owner] = False
+                    if any(re.search(r"\bsuperseded\b", h["abstract"], re.I)
+                           for h in hits if document(h["uri"], self.principal) == owner):
+                        text, _ = await self.assemble(owner)
+                        checked[owner] = bool(re.match(r"\A\s*#\s+Superseded\s*:", text, re.I))
+                if not checked[owner]:
+                    current.append(entry)
+            values = current
         return {"matches": values[:limit], "returned": min(len(values), limit),
                 "truncated": len(hits) == 100 or len(values) > limit, "complete": False,
                 "batch_limit": 100, "matching_parts_basis": "returned scoped batch only"}

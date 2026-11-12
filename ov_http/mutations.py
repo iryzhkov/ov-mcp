@@ -225,7 +225,7 @@ class Mutations:
                 if not isinstance(child, str):
                     raise Refused()
                 if relations_sidecar and child == parent + "/.relations.json":
-                    # Private physical metadata is preserved only by document writes.
+                    # Private physical metadata travels with its authorized owner.
                     # The traversed parent is already canonical and authorized.
                     if row["isDir"] is not False or len(child.encode("utf-8")) > 1024 or child in nodes:
                         raise Refused()
@@ -381,9 +381,14 @@ class Mutations:
         if await self.stat(target) is not None:
             raise OperationError({"error": "Destination exists; no move dispatched.",
                                   "outcome": "not_started", "conflict": True})
-        nodes = await self.subtree(source, "read") if row["isDir"] else [source]
+        nodes = await self.subtree(source, "read", relations_sidecar=True) if row["isDir"] else [source]
         for path in nodes:
             destination = target + path[len(source):]
+            if path in self.metadata_owner:
+                if len(destination.encode("utf-8")) > 1024:
+                    raise Refused()
+                path = self.metadata_owner[path]
+                destination = target + path[len(source):]
             if any(c.isspace() for c in path):
                 raise Refused()
             for action in ("read", "write", "remove", "maintain"):
@@ -467,10 +472,11 @@ class Mutations:
                 raise OperationError({"error": "Resource not found.", "outcome": "not_started"})
             if row["isDir"] and not a.get("recursive", False):
                 unsupported("Directory removal requires recursive=true.")
-            nodes = await self.subtree(uri, action) if row["isDir"] else [uri]
-        checks = [(action, path) for path in nodes]
+            nodes = await self.subtree(uri, action, relations_sidecar=True) if row["isDir"] else [uri]
+        checks = [(action, self.metadata_owner.get(path, path)) for path in nodes]
+        visible_nodes = [path for path in nodes if path not in self.metadata_owner]
         if a.get("dry_run", False):
-            return {"uri": uri, "outcome": "dry_run", "paths": nodes, "snapshot": False,
+            return {"uri": uri, "outcome": "dry_run", "paths": visible_nodes, "snapshot": False,
                     "recursive": False if prune else a.get("recursive", False)}
         endpoint = "/fs/resources-only/" + ("prune-index" if prune else "remove")
         payload = {"uri": uri} if prune else {"uri": uri, "recursive": a.get("recursive", False)}

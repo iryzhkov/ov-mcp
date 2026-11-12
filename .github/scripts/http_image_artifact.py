@@ -23,9 +23,9 @@ INPUTS = {
     "ov_http/config.py": "365ff98c9b4547adaded19279dea8b99cc98299ca269d6698be381302aab6c22",
     "ov_http/document_node.py": "19ee84a19076a52db67341176670b6b589cc6e940cfe95973ca0e5f010b2a1bf",
     "ov_http/document_write.py": "d74c4f570daf35f9ddf34badf9a4fae109b209136dcd47c975ede7ea6768e9ad",
-    "ov_http/mutations.py": "11174f99d35aad518edf92ec42ed910334a1c593b0609ebbea8ca120b103f552",
+    "ov_http/mutations.py": "80c062d6fa36c58b5578b14351b4b2abb82fe0e2c9f92664846af25caf2972e9",
     "ov_http/personal.py": "72ee79000d38d80740a0f938631e8c7ea7d785460db84acf31cead0df4ee8f28",
-    "ov_http/reader.py": "0b2fe8b5cb3999d467ac32d6c822375d1bdfdaf17a13ebed6d3f737a2a1bdbd4",
+    "ov_http/reader.py": "68e2b6ffcf239b7769d7b8206efc92f81f3f09ebeaf591881023b2ca3a6b0bb7",
 }
 OUT = Path("http-image-artifact")
 CONTEXT = Path(".scratch/context")
