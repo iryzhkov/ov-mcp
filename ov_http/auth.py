@@ -32,6 +32,23 @@ def canonical(uri: str) -> str:
     return uri
 
 
+def strip_trailing_slash(uri):
+    """Accept exactly one trailing directory slash at the tool boundary.
+
+    Only `<scheme>://<authority>/<path>/` loses its final slash. A scheme or
+    authority root such as `viking://` or `viking://resources/`, a doubled
+    slash and every non-string pass through unchanged, so the canonical
+    policy still refuses them exactly as before. Nothing else is rewritten.
+    """
+    if not isinstance(uri, str) or not uri.endswith("/") or uri.endswith("//"):
+        return uri
+    head = uri[:-1]
+    _, separator, rest = head.partition("://")
+    if not separator or "/" not in rest:
+        return uri
+    return head
+
+
 def storage_internal_name(name: str) -> bool:
     # Qualified against upstream storage/internal_names.py at the pinned revision.
     return name in STORAGE_INTERNAL_NAMES or name.startswith(".exact.ovlock.")

@@ -258,7 +258,7 @@ async def test_sdk_denials_bounds_unknown_and_no_retry(personal):
         for uri in ["viking://user/foreign/memories/preferences/n.md", "viking://~/memories/a.md",
                     "viking://session/sibling", ROOT + "/../x.md", ROOT + "/a/%2e%2e/x.md",
                     ROOT + "/a/x%252f.md", ROOT + "/a//x.md", ROOT + "/a/\\x.md",
-                    ROOT + "/a/.abstract.md", ROOT + "/a/x.md/", "viking://resources/a.md"]:
+                    ROOT + "/a/.abstract.md", ROOT + "/a/x.md//", "viking://resources/a.md"]:
             before = len(e.calls)
             r, _ = await call(s, "personal_memory_read", uri=uri)
             assert r.is_error and len(e.calls) == before

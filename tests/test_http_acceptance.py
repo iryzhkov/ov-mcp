@@ -407,7 +407,7 @@ async def test_scope_precedes_retrieval_traversal_neighbors_and_response_equival
         _, missing = await call(session, "memory_read", uri=A + "/absent.md")
         for bad in (B + "/secret.md", A + "-neighbor/leak.md", "viking://resources",
                     A + "/../namespaceB/secret.md", A + "/%2e%2e/secret.md",
-                    A + "/x?uri=" + B, A + "/x#part", A + "//note.md", A + "/note.md/",
+                    A + "/x?uri=" + B, A + "/x#part", A + "//note.md", A + "/note.md//",
                     A + "/x\\secret", "VIKING://resources/namespaceA/note.md"):
             for tool in ("memory_read", "memory_abstract", "memory_ls", "memory_relations"):
                 before = len(f.captured)
