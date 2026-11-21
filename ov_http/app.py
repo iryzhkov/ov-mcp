@@ -14,7 +14,7 @@ from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool, ToolAn
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from .auth import Principal, Refused, Verifier
+from .auth import Principal, Refused, Verifier, strip_trailing_slash
 from .config import Config, RESOURCES_PROFILE
 from .personal import PERSONAL_ACTIONS, PERSONAL_SPECS, PERSONAL_READ_ONLY, call_personal
 from .reader import Backend, BudgetExhausted, Reader, SAFE_ERROR
@@ -28,6 +28,10 @@ STRING = {"type": "string", "minLength": 1, "maxLength": 1024}
 URI_ARG = {**STRING, "description": "Canonical viking://resources/... URI within this token's grants."}
 LIMIT = {"type": "integer", "minimum": 1, "maximum": 100}
 BOOL = {"type": "boolean"}
+# Every URI-typed argument across the reader, mutation and personal catalogs.
+# memory_write's `filename` is a name, not a URI, and is deliberately absent.
+URI_KEYS = ("uri", "scope", "to", "from_uri", "to_uri")
+URI_LIST_KEYS = ("targets",)
 SPECS = {
     "memory_search": ("Scoped semantic search requires the operator-pinned namespace profile. Bounded, incomplete batch.",
                       {"query": STRING, "scope": {**URI_ARG, "description": "Optional authorized directory. The resources profile narrows retrieval; the legacy profile asserts an exact grant."},
@@ -69,6 +73,22 @@ def schema(name, profile="disabled"):
         properties = {**properties, "offset": {"type": "integer", "minimum": 0, "maximum": 100000,
                       "description": "Visible-node offset. Reauthorized each call; best effort under concurrent edits. Page cap 40. Multiple grants require an explicit directory URI."}}
     return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
+
+
+def canonical_arguments(arguments):
+    """Return a copy whose URI arguments lost one trailing directory slash.
+
+    Runs before any authorization, so grants, backend calls and returned URIs
+    only ever see the canonical form. All other aliases stay refused downstream.
+    """
+    arguments = dict(arguments)
+    for key in URI_KEYS:
+        if key in arguments:
+            arguments[key] = strip_trailing_slash(arguments[key])
+    for key in URI_LIST_KEYS:
+        if isinstance(arguments.get(key), list):
+            arguments[key] = [strip_trailing_slash(item) for item in arguments[key]]
+    return arguments
 
 
 def result(value, error=False):
@@ -185,6 +205,9 @@ def create_app(config: Config, *, jwks_ssl_context: ssl.SSLContext | None = None
             name, arguments = params.name, params.arguments or {}
             if name not in catalog:
                 return result({"error": "Tool unavailable."}, True)
+            jsonschema.validate(arguments, schema(name, config.semantic_profile))
+            arguments = canonical_arguments(arguments)
+            # Revalidate: trimming can collapse unique list items into duplicates.
             jsonschema.validate(arguments, schema(name, config.semantic_profile))
             request = ctx.request
             principal = request.scope.get("ov.principal") if request is not None else None

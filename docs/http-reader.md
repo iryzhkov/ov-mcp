@@ -106,6 +106,17 @@ It rejects dot segments, repeated/trailing slashes, percent encoding, backslashe
 queries and fragments. There is no deny-rule language. Namespace grants must be
 chosen by protected issuer configuration, never by the caller's tool arguments.
 
+Tool arguments get one convenience before any check. When a URI-typed argument
+(`uri`, `scope`, `to`, `from_uri`, `to_uri` and each `targets` item, across the
+reader, mutation and personal tools) ends in exactly one slash after at least
+one path segment, the tool boundary removes that slash, so
+`viking://resources/namespaceA/` is handled exactly like
+`viking://resources/namespaceA`. The bare root `viking://resources/`, a scheme
+root and any repeated slash pass through unchanged and are refused as before. Authorization,
+backend requests and returned URIs see only the canonical form. Every other
+alias above is still refused, and signed `ov_namespaces` grants are not
+normalized at all.
+
 JWTs are limited to 12 KiB, decoded claims to 8 KiB and header to 1 KiB. Duplicate
 JSON keys, untrusted JOSE fields and algorithm/key URL selection are refused.
 JWKS is limited to 64 KiB and 16 distinct RS256 RSA public keys of 2048 to 8192
