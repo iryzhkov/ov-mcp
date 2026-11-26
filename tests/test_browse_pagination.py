@@ -383,6 +383,87 @@ async def test_grep_resumes_at_next_offset_until_the_scan_is_complete(limit):
     assert found == expected | {ns + "/memory-curation-status.md"}
 
 
+async def grep_sequence(pages, root, pattern, *, limit=100, group=True, include_archived=False):
+    """Follow next_offset from zero; return every call's result."""
+    values, offset = [], 0
+    while True:
+        async with reader(pages) as read:
+            value = await read.grep(pattern, root, False, limit, group, include_archived, offset)
+            assert read.backend.requests <= 128
+        assert not result(value).is_error
+        values.append(value)
+        if value["next_offset"] is None:
+            return values
+        assert value["next_offset"] > offset and not value["scan_complete"]
+        offset = value["next_offset"]
+
+
+def deep(root, levels):
+    return root + "".join(f"/d{i:02}" for i in range(levels))
+
+
+@pytest.mark.asyncio
+async def test_grep_depth_limit_is_never_completed_by_resuming():
+    pages = Pages()
+    ns = A + "/deep"
+    # Many early files exhaust the first call before the depth boundary.
+    pages.files = {ns + f"/a/early_{i:03}.md" for i in range(150)}
+    hidden = deep(ns + "/b", 12) + "/note.md"
+    pages.files |= {hidden, ns + "/c/late.md"}
+    pages.texts = {hidden: "needle"}
+    values = await grep_sequence(pages, ns, "needle")
+    assert len(values) > 1
+    last = values[-1]
+    assert last["depth_limited"] and not last["scan_complete"] and last["truncated"]
+    assert last["next_offset"] is None and last["continuation_limited"]
+    assert not any(v["scan_complete"] for v in values)
+    assert all(v["matches"] == [] for v in values)
+
+
+@pytest.mark.asyncio
+async def test_grep_excluded_archive_depth_does_not_block_completion():
+    pages = Pages()
+    ns = A + "/live"
+    pages.files = {deep(ns + "/archive", 12) + "/old.md", ns + "/note.md"}
+    pages.texts = {ns + "/note.md": "needle"}
+    [value] = await grep_sequence(pages, ns, "needle")
+    assert value["scan_complete"] and not value["depth_limited"] and not value["truncated"]
+    assert value["matches"] == [{"uri": ns + "/note.md", "matching_parts": 1}]
+    [archived] = await grep_sequence(pages, ns, "needle", include_archived=True)
+    assert archived["depth_limited"] and not archived["scan_complete"]
+
+
+@pytest.mark.asyncio
+async def test_grep_offset_ceiling_matches_listing():
+    pages = Pages()
+
+    def at_ceiling(body, tree, uri):
+        body.update(result=[{"uri": uri + "/edge.md", "isDir": False}], has_more=True)
+
+    pages.files = {A + "/edge.md"}
+    pages.fault = at_ceiling
+    async with reader(pages) as read:
+        value = await read.grep("needle", A, False, 5, True, False, BROWSE_OFFSET_LIMIT)
+    assert [p["node_limit"] for path, p in pages.calls if path.endswith("/tree")] == ["1"]
+    assert not value["scan_complete"] and value["next_offset"] is None
+    assert value["continuation_limited"] and value["scanned_files"] == 1
+
+
+@pytest.mark.asyncio
+async def test_grep_output_budget_returns_a_resumable_batch():
+    pages = Pages()
+    ns = A + "/long"
+    stem = ns + ("/" + "n" * 200) * 4
+    pages.files = {stem + f"/f{i:03}.md" for i in range(60)}
+    pages.texts = {p: "needle" for p in pages.files}
+    values = await grep_sequence(pages, ns, "needle", group=False)
+    assert len(values) > 1 and values[-1]["scan_complete"]
+    found = [m["uri"] for v in values for m in v["matches"]]
+    assert sorted(found) == sorted(pages.files) and len(found) == len(set(found))
+    assert all(m["matching_parts"] == 1 for v in values for m in v["matches"])
+    assert all(len(json.dumps(v).encode()) <= 49152 for v in values)
+
+
 @pytest.mark.asyncio
 async def test_grep_offsets_need_one_directory_and_file_grants_scan_once():
     pages = Pages()

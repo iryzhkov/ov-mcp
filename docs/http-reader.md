@@ -223,12 +223,19 @@ Under the resources profile, grep over one authorized directory is a resumable
 scan of native typed `/fs/tree` pages (40 visible nodes per request, level limit
 12). It does not stat each node, and with `include_archived=false` it reads no
 file under an archive directory. Each call reports `scan_complete`,
-`scanned_files`, `offset` and `next_offset`. When the request or data budget,
-or reaching `limit` matching documents, stops a call, `next_offset` names the first unscanned visible node; the caller
+`scanned_files`, `depth_limited`, `offset` and `next_offset`. When the request or
+data budget, reaching `limit` matching documents, or the 40 KiB serialized-match
+budget (inside the 48 KiB tool output cap) stops a call, `next_offset` names the first unscanned visible node; the caller
 passes it back as `offset` and repeats until `scan_complete` is true. Matches
 cover only the scanned range, so `matches=[]` proves absence only together with
 `scan_complete=true` across the whole sequence, and `truncated` stays true until
-then. Offsets are best effort under concurrent edits, like listings. A file-only
+then. Completeness holds only for one sequence that starts at offset 0 and
+follows each returned `next_offset`. An in-scope directory at the native tree
+level limit (12) stops the scan with `depth_limited=true` and no `next_offset`,
+because its children are unreachable; such a scan never reports completion.
+Archive directories excluded by `include_archived=false` do not count. Near the
+offset ceiling a call requests only the remaining range, as listings do.
+Offsets are best effort under concurrent edits, like listings. A file-only
 grant is read once and refuses a nonzero offset; multiple grants without an
 explicit directory URI keep the earlier bounded walk and refuse offsets.
 

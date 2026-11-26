@@ -1,5 +1,6 @@
 """Per-call scoped filesystem reader; never imports the broad stdio wrapper."""
 from pathlib import PurePosixPath
+import json
 import math
 import re
 
@@ -16,6 +17,8 @@ HIDDEN = {".abstract.md", ".overview.md"}
 ARCHIVE = {"archive", "archived", "_archive"}
 BROWSE_PAGE_LIMIT = 40  # 40 canonical 1024-byte URIs fit the MCP output budget.
 BROWSE_OFFSET_LIMIT = 100000
+# Serialized grep matches stay well inside the 48 KiB MCP tool output cap.
+GREP_OUTPUT_BUDGET = 40960
 
 
 class BudgetExhausted(Exception):
@@ -445,22 +448,30 @@ class Reader:
 
         Discovery costs one request per page of up to 40 visible nodes instead of
         one stat per node, and archive files are skipped without a read. When a
-        local budget or the match limit stops the scan, next_offset names the
-        first unscanned node, so callers can continue until scan_complete is true. scan_complete=false
-        never means "no matches" for the unscanned remainder.
+        local budget, the match limit or the output budget stops the scan,
+        next_offset names the first unscanned node, so callers can continue
+        until scan_complete is true. scan_complete=false never means "no
+        matches" for the unscanned remainder. An in-scope directory at the
+        native depth limit stops the scan with no offset: content below it is
+        unreachable, so no sequence of calls may claim completion.
         """
         self.principal.require_action("read", root)
         needle = pattern.casefold() if case_insensitive else pattern
-        matches, scanned = {}, 0
+        matches, scanned, output = {}, 0, 0
 
         def observe(path, text):
+            nonlocal output
             haystack = text.casefold() if case_insensitive else text
             if needle in haystack:
                 key = document(path, self.principal) if group else path
-                if key not in matches and len(matches) >= limit:
-                    # Stop before this node so the next call resumes here and
-                    # no match is skipped between calls.
-                    raise BudgetExhausted()
+                if key not in matches:
+                    size = len(json.dumps({"uri": key, "matching_parts": 999999},
+                                          ensure_ascii=False, separators=(",", ":")).encode()) + 1
+                    if len(matches) >= limit or output + size > GREP_OUTPUT_BUDGET:
+                        # Stop before this node so the next call resumes here and
+                        # no match is skipped between calls.
+                        raise BudgetExhausted()
+                    output += size
                 match = matches.setdefault(key, {"uri": key, "matching_parts": 0})
                 match["matching_parts"] += 1
 
@@ -475,32 +486,35 @@ class Reader:
                     scanned = 1
                 scan_complete = True
             else:
-                while True:
-                    rows, more = await self.backend.browse_rows(
-                        root, True, BROWSE_PAGE_LIMIT, position, 12)
+                while not depth_limited and position <= BROWSE_OFFSET_LIMIT:
+                    # Same remaining-range cap as paged_listing at the ceiling.
+                    page = min(BROWSE_PAGE_LIMIT, BROWSE_OFFSET_LIMIT + 1 - position)
+                    rows, more = await self.backend.browse_rows(root, True, page, position, 12)
                     for row in rows:
                         path = row["uri"]
+                        in_scope = include_archived or not archived(path)
                         if row["isDir"]:
                             # The native tree omits children below level 12.
-                            depth_limited |= path[len(root) + 1:].count("/") >= 11
-                        elif include_archived or not archived(path):
+                            if in_scope and path[len(root) + 1:].count("/") >= 11:
+                                depth_limited = True
+                                break
+                        elif in_scope:
                             observe(path, await self.backend.text(path))
                             scanned += 1
                         position += 1
-                    if not more:
-                        scan_complete = True
-                        break
-                    if position > BROWSE_OFFSET_LIMIT:
-                        break
+                    else:
+                        if not more:
+                            scan_complete = True
+                            break
         except BudgetExhausted:
             pass
         results = list(matches.values())
-        next_offset = None if scan_complete or position > BROWSE_OFFSET_LIMIT else position
-        scan_complete = scan_complete and not depth_limited
+        resumable = not scan_complete and not depth_limited and position <= BROWSE_OFFSET_LIMIT
+        next_offset = position if resumable else None
         return {"matches": results, "returned": len(results),
                 "truncated": not scan_complete,
                 "scan_complete": scan_complete, "offset": offset, "next_offset": next_offset,
-                "scanned_files": scanned,
+                "scanned_files": scanned, "depth_limited": depth_limited,
                 "continuation_limited": not scan_complete and next_offset is None,
                 "mode": "literal substring; no regex",
                 "pagination": "visible-node offset; best effort under concurrent edits"}
