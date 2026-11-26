@@ -219,6 +219,24 @@ chunk hits by permitted document ancestor and hides archive namespaces by defaul
 It never groups a chunk-only grant to an ancestor outside that grant. There are
 no semantic scores and no claim of a complete store-wide count.
 
+Under the resources profile, grep over one authorized directory is a resumable
+scan of native typed `/fs/tree` pages (40 visible nodes per request, level limit
+12). It does not stat each node, and with `include_archived=false` it reads no
+file under an archive directory. Each call reports `scan_complete`,
+`scanned_files`, `offset` and `next_offset`. When the request or data budget,
+or reaching `limit` matching documents, stops a call, `next_offset` names the first unscanned visible node; the caller
+passes it back as `offset` and repeats until `scan_complete` is true. Matches
+cover only the scanned range, so `matches=[]` proves absence only together with
+`scan_complete=true` across the whole sequence, and `truncated` stays true until
+then. Offsets are best effort under concurrent edits, like listings. A file-only
+grant is read once and refuses a nonzero offset; multiple grants without an
+explicit directory URI keep the earlier bounded walk and refuse offsets.
+
+The earlier walk stat-ed every node under a 64-request discovery allowance. In
+November 2026 the openviking namespace held a large `archive/` directory sorting
+before the `memory-curation-*` notes, so the walk ran out inside the archive and
+returned `matches=[]` with `truncated=true` for literals those notes contained.
+
 Reads reconstruct visible chunks in natural name order, handle numbered verbatim
 containers, and support line offsets/limits and source-part lists. Markdown
 section order may differ from the ingested original. Abstract/overview explicitly
@@ -276,8 +294,9 @@ response allowance before I/O, so a scan may stop with less than that allowance
 unused. Tool output is at most 48 KiB; read text is at
 most 24,000 characters. Upstream redirects and compressed responses are refused.
 Traversal, request and aggregate-data budgets return safe partial scan results
-with explicit truncation. Grep and relations spend at most the first 64 requests
-on discovery to leave allowance for content. Partial sizes, matching-part counts,
+with explicit truncation. Relations and multi-root grep spend at most the first
+64 requests on discovery to leave allowance for content; single-directory grep
+under the resources profile pages instead and returns a resume offset. Partial sizes, matching-part counts,
 links and backlinks cover only validated observed records, not a complete scan.
 A backlink document contributes nothing until its assembly is complete. An
 incomplete requested document assembly fails rather than claiming full content.

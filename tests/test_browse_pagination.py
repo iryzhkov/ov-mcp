@@ -37,6 +37,7 @@ class Pages:
         self.sizes = []
         self.fault = None
         self.long_names = False
+        self.texts = {}
 
     def paths(self, root, recursive, depth):
         files = self.files
@@ -55,7 +56,10 @@ class Pages:
         self.calls.append((path, params))
         uri = params["uri"]
         assert uri == ROOT or uri.startswith(ROOT + "/")
-        if path.endswith("/stat"):
+        if path.endswith("/content/read"):
+            assert uri in self.files and set(params) == {"uri"}
+            body = {"status": "ok", "result": self.texts.get(uri, "plain text " + uri)}
+        elif path.endswith("/stat"):
             body = {"status": "ok", "result": {
                 "uri": uri, "isDir": any(f.startswith(uri + "/") for f in self.files)
                 or self.long_names, "size": 0, "count": 999999,
@@ -296,14 +300,111 @@ async def test_output_request_and_offset_ceiling_limits():
 def test_profile_specific_schema_preserves_legacy_catalog():
     for name in SPECS:
         assert ("offset" in schema(name, RESOURCES_PROFILE)["properties"]) == (
-            name in ("memory_ls", "memory_tree", "memory_read"))
-    for name in ("memory_ls", "memory_tree"):
+            name in ("memory_ls", "memory_tree", "memory_read", "memory_grep"))
+    for name in ("memory_ls", "memory_tree", "memory_grep"):
         for profile in ("disabled", "namespace-directories-v1"):
             with pytest.raises(jsonschema.ValidationError):
                 jsonschema.validate({"offset": 0}, schema(name, profile))
         for offset in (-1, True, 100001, "0"):
             with pytest.raises(jsonschema.ValidationError):
                 jsonschema.validate({"offset": offset}, schema(name, RESOURCES_PROFILE))
+
+
+def curator_layout(pages, archives=150):
+    """Mirror the 2026-11 openviking namespace that defeated the per-node walk.
+
+    A large archive sorts between the first live notes and the exact-directory
+    notes that contain the literal, so a stat-per-node walk spent its discovery
+    allowance inside archive/ and reported matches=[] with truncated=true.
+    """
+    ns = A + "/openviking"
+    pages.files = {ns + "/agent-access-on-normandy.md/agent-access-on-normandy.md",
+                   ns + "/agent-access.md/agent-access.md",
+                   ns + "/memory-curation-job.md/0001/0000.md",
+                   ns + "/memory-curation-status.md/0001/0000.md",
+                   ns + "/zz-unrelated.md/0001/0000.md"}
+    pages.files |= {ns + f"/archive/backup-{i:03}.md/0001/0000.md" for i in range(archives)}
+    pages.texts = {
+        ns + "/agent-access-on-normandy.md/agent-access-on-normandy.md": "# agent-access-on-normandy",
+        ns + "/agent-access.md/agent-access.md": "See [[agent-access-on-normandy]].",
+        ns + "/memory-curation-job.md/0001/0000.md": "Related: [[agent-access-on-normandy]].",
+        ns + "/memory-curation-status.md/0001/0000.md":
+            "[[upkeeper-publication]] and viking://resources/homelab/upkeeper-publication.md",
+    }
+    pages.texts |= {p: "[[upkeeper-publication]] [[agent-access-on-normandy]]"
+                    for p in pages.files if "/archive/" in p}
+    return ns
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pattern,expected", [
+    ("upkeeper-publication", ["memory-curation-status.md"]),
+    ("agent-access-on-normandy", ["agent-access-on-normandy.md", "agent-access.md",
+                                  "memory-curation-job.md"]),
+])
+async def test_grep_reaches_exact_directory_notes_behind_a_large_archive(pattern, expected):
+    pages = Pages()
+    ns = curator_layout(pages)
+    async with reader(pages) as read:
+        value = await read.grep(pattern, ns, False, 20, True, False)
+        assert value["scan_complete"] is True and value["truncated"] is False
+        assert value["next_offset"] is None and value["scanned_files"] == 5
+        assert [m["uri"] for m in value["matches"]] == [ns + "/" + name for name in expected]
+        assert read.backend.requests <= 128
+    reads = [params["uri"] for path, params in pages.calls if path.endswith("/content/read")]
+    assert reads and not any("/archive/" in uri for uri in reads)
+    assert not any(path.endswith("/fs/ls") for path, _ in pages.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [3, 100])
+async def test_grep_resumes_at_next_offset_until_the_scan_is_complete(limit):
+    pages = Pages()
+    ns = curator_layout(pages)
+    async with reader(pages) as read:
+        archived = await read.grep("upkeeper-publication", ns, False, 100, True, True)
+    # Reading every archive file exceeds one call's 128-request budget.
+    assert archived["scan_complete"] is False and archived["truncated"] is True
+    assert archived["next_offset"] and not archived["continuation_limited"]
+    found, offset, calls = set(), 0, 0
+    while True:
+        async with reader(pages) as read:
+            value = await read.grep("upkeeper-publication", ns, False, limit, True, True, offset)
+            assert read.backend.requests <= 128 and value["returned"] <= limit
+        calls += 1
+        found |= {m["uri"] for m in value["matches"]}
+        if value["scan_complete"]:
+            assert value["next_offset"] is None and not value["truncated"]
+            break
+        assert value["truncated"] and value["next_offset"] > offset
+        offset = value["next_offset"]
+    assert calls > 1
+    expected = {ns + f"/archive/backup-{i:03}.md" for i in range(150)}
+    assert found == expected | {ns + "/memory-curation-status.md"}
+
+
+@pytest.mark.asyncio
+async def test_grep_offsets_need_one_directory_and_file_grants_scan_once():
+    pages = Pages()
+    ns = curator_layout(pages, archives=2)
+    async with reader(pages, (A, B)) as read:
+        with pytest.raises(Refused):
+            await read.grep("needle", None, False, 5, True, False, 40)
+    assert not pages.calls
+    for offset in (-1, True, 100001):
+        async with reader(pages) as read:
+            with pytest.raises(Refused):
+                await read.grep("needle", ns, False, 5, True, False, offset)
+    assert not pages.calls
+    status = ns + "/memory-curation-status.md/0001/0000.md"
+    async with reader(pages, (status,)) as read:
+        value = await read.grep("UPKEEPER", None, True, 5, True, False)
+        assert value["scan_complete"] and value["matches"] == [{"uri": status, "matching_parts": 1}]
+        with pytest.raises(Refused):
+            await read.grep("UPKEEPER", None, True, 5, True, False, 1)
+    async with reader(pages, (B,)) as read:
+        with pytest.raises(Refused):
+            await read.grep("needle", ns, False, 5, True, False)
 
 
 @pytest_asyncio.fixture

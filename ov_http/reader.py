@@ -165,6 +165,12 @@ class Backend:
 
     async def browse_page(self, uri: str, recursive: bool, limit: int, offset: int,
                           depth: int) -> tuple[list[str], bool]:
+        rows, more = await self.browse_rows(uri, recursive, limit, offset, depth)
+        return [row["uri"] for row in rows], more
+
+    async def browse_rows(self, uri: str, recursive: bool, limit: int, offset: int,
+                          depth: int) -> tuple[list[dict], bool]:
+        """One validated native page of {uri, isDir} rows; no other upstream fields."""
         if (self.config.semantic_profile != RESOURCES_PROFILE
                 or type(limit) is not int or not 1 <= limit <= BROWSE_PAGE_LIMIT
                 or type(offset) is not int or not 0 <= offset <= BROWSE_OFFSET_LIMIT
@@ -188,7 +194,7 @@ class Backend:
         if (not isinstance(entries, list) or len(entries) > limit or type(more) is not bool
                 or (more and len(entries) != limit)):
             raise Refused()
-        paths = []
+        paths, rows = [], []
         for entry in entries:
             # Original rows preserve denied placeholders that simple ls erases.
             # Project URIs only after validating the typed row and its authority.
@@ -209,7 +215,8 @@ class Backend:
                     or len(relative) > (depth if recursive else 1) or child in paths):
                 raise Refused()
             paths.append(child)
-        return paths, more
+            rows.append({"uri": child, "isDir": entry["isDir"]})
+        return rows, more
 
     async def text(self, uri: str) -> str:
         value = await self._get("/content/read", uri)
@@ -399,7 +406,17 @@ class Reader:
         return {"matches": matches[:limit], "truncated": truncated or len(matches) > limit}
 
     async def grep(self, pattern: str, uri: str | None, case_insensitive: bool,
-                   limit: int, group: bool, include_archived: bool):
+                   limit: int, group: bool, include_archived: bool, offset: int = 0):
+        if type(offset) is not int or not 0 <= offset <= BROWSE_OFFSET_LIMIT:
+            raise Refused()
+        if self.backend.config.semantic_profile == RESOURCES_PROFILE:
+            roots = self.principal.scopes(uri)
+            if len(roots) == 1:
+                return await self.paged_grep(roots[0], pattern, case_insensitive, limit,
+                                             group, include_archived, offset)
+            if offset:
+                # Offsets are only unambiguous within one authorized directory.
+                raise Refused()
         # Leave half the request allowance for reading discovered files.
         nodes, truncated = await self.candidates(uri, request_limit=64)
         matches = {}
@@ -421,6 +438,72 @@ class Reader:
         results = list(matches.values())
         return {"matches": results[:limit], "truncated": truncated or len(results) > limit,
                 "mode": "literal substring; no regex"}
+
+    async def paged_grep(self, root: str, pattern: str, case_insensitive: bool, limit: int,
+                         group: bool, include_archived: bool, offset: int):
+        """Resumable scan over native typed tree pages of one authorized root.
+
+        Discovery costs one request per page of up to 40 visible nodes instead of
+        one stat per node, and archive files are skipped without a read. When a
+        local budget or the match limit stops the scan, next_offset names the
+        first unscanned node, so callers can continue until scan_complete is true. scan_complete=false
+        never means "no matches" for the unscanned remainder.
+        """
+        self.principal.require_action("read", root)
+        needle = pattern.casefold() if case_insensitive else pattern
+        matches, scanned = {}, 0
+
+        def observe(path, text):
+            haystack = text.casefold() if case_insensitive else text
+            if needle in haystack:
+                key = document(path, self.principal) if group else path
+                if key not in matches and len(matches) >= limit:
+                    # Stop before this node so the next call resumes here and
+                    # no match is skipped between calls.
+                    raise BudgetExhausted()
+                match = matches.setdefault(key, {"uri": key, "matching_parts": 0})
+                match["matching_parts"] += 1
+
+        position, scan_complete, depth_limited = offset, False, False
+        try:
+            st = await self.backend.stat(root)
+            if not st["isDir"]:
+                if offset:
+                    raise Refused()
+                if include_archived or not archived(root):
+                    observe(root, await self.backend.text(root))
+                    scanned = 1
+                scan_complete = True
+            else:
+                while True:
+                    rows, more = await self.backend.browse_rows(
+                        root, True, BROWSE_PAGE_LIMIT, position, 12)
+                    for row in rows:
+                        path = row["uri"]
+                        if row["isDir"]:
+                            # The native tree omits children below level 12.
+                            depth_limited |= path[len(root) + 1:].count("/") >= 11
+                        elif include_archived or not archived(path):
+                            observe(path, await self.backend.text(path))
+                            scanned += 1
+                        position += 1
+                    if not more:
+                        scan_complete = True
+                        break
+                    if position > BROWSE_OFFSET_LIMIT:
+                        break
+        except BudgetExhausted:
+            pass
+        results = list(matches.values())
+        next_offset = None if scan_complete or position > BROWSE_OFFSET_LIMIT else position
+        scan_complete = scan_complete and not depth_limited
+        return {"matches": results, "returned": len(results),
+                "truncated": not scan_complete,
+                "scan_complete": scan_complete, "offset": offset, "next_offset": next_offset,
+                "scanned_files": scanned,
+                "continuation_limited": not scan_complete and next_offset is None,
+                "mode": "literal substring; no regex",
+                "pagination": "visible-node offset; best effort under concurrent edits"}
 
     async def semantic(self, kind: str, query: str, scope: str | None, limit: int,
                        group: bool, include_archived: bool):
