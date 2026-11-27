@@ -237,8 +237,11 @@ level limit (12) stops the scan with `depth_limited=true` and no `next_offset`,
 because its children are unreachable; such a scan never reports completion.
 Archive directories excluded by `include_archived=false` do not count. Near the
 offset ceiling a call requests only the remaining range, as listings do.
-The node at the starting offset is always processed without the time bound, so
-every call advances; a single backend request that alone exceeds the 20-second
+The node at the starting offset is always processed without the scan time bound,
+so every call whose stopping condition is that budget advances. The setup stat,
+first page and first node still share the 20-second reader deadline; if they
+exhaust it, the call returns the safe tool error without a cursor. A single
+backend request that alone exceeds the 20-second
 reader deadline still returns the safe tool error. Offsets are best effort
 under concurrent edits, like listings. A file-only
 grant is read once and refuses a nonzero offset; multiple grants without an

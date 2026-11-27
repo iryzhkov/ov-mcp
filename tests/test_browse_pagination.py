@@ -574,3 +574,26 @@ async def test_sdk_grep_time_budget_yields_resumable_partial_results(sdk_pages, 
     assert calls > 1 and value["scan_complete"] and not value["truncated"]
     assert found == [ns + "/agent-access-on-normandy.md", ns + "/agent-access.md",
                      ns + "/memory-curation-job.md"]
+
+
+@pytest.mark.asyncio
+async def test_sdk_grep_cuts_off_a_read_in_flight_at_the_budget(sdk_pages, monkeypatch):
+    # Start at the first file so its 1.0 s read is the unbounded starting node.
+    # The next read starts about 1.0 s in, inside the 1.3 s budget, and would
+    # end near 2.0 s. A check made only when a request starts would let it
+    # finish and report its match; the in-flight bound must cut it off and
+    # resume at that unread node.
+    fixture, pages = sdk_pages
+    ns = curator_layout(pages, archives=2)
+    nodes = pages.paths(ns, True, 12)
+    first = nodes.index(ns + "/agent-access-on-normandy.md/agent-access-on-normandy.md")
+    second = nodes.index(ns + "/agent-access.md/agent-access.md")
+    pages.delay = 1.0
+    monkeypatch.setattr(reader_module, "GREP_TIME_BUDGET", 1.3)
+    async with fixture.session(fixture.token([ROOT])) as session:
+        response, value = await call(session, "memory_grep", uri=ns, offset=first,
+                                     pattern="agent-access-on-normandy", limit=20)
+    assert not response.is_error, value
+    assert [m["uri"] for m in value["matches"]] == [ns + "/agent-access-on-normandy.md"]
+    assert value["scanned_files"] == 1 and value["next_offset"] == second
+    assert not value["scan_complete"] and value["truncated"]
