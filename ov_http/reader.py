@@ -2,6 +2,7 @@
 from pathlib import PurePosixPath
 import json
 import math
+import time
 import re
 
 import httpx
@@ -19,6 +20,8 @@ BROWSE_PAGE_LIMIT = 40  # 40 canonical 1024-byte URIs fit the MCP output budget.
 BROWSE_OFFSET_LIMIT = 100000
 # Serialized grep matches stay well inside the 48 KiB MCP tool output cap.
 GREP_OUTPUT_BUDGET = 40960
+# Grep yields a resumable partial result well before the 20-second tool deadline.
+GREP_TIME_BUDGET = 12.0
 
 
 class BudgetExhausted(Exception):
@@ -476,6 +479,13 @@ class Reader:
                 match["matching_parts"] += 1
 
         position, scan_complete, depth_limited = offset, False, False
+        deadline = time.monotonic() + GREP_TIME_BUDGET
+
+        def check_time():
+            # Always allow progress past the starting offset before yielding.
+            if position > offset and time.monotonic() >= deadline:
+                raise BudgetExhausted()
+
         try:
             st = await self.backend.stat(root)
             if not st["isDir"]:
@@ -489,6 +499,7 @@ class Reader:
                 while not depth_limited and position <= BROWSE_OFFSET_LIMIT:
                     # Same remaining-range cap as paged_listing at the ceiling.
                     page = min(BROWSE_PAGE_LIMIT, BROWSE_OFFSET_LIMIT + 1 - position)
+                    check_time()
                     rows, more = await self.backend.browse_rows(root, True, page, position, 12)
                     for row in rows:
                         path = row["uri"]
@@ -499,6 +510,7 @@ class Reader:
                                 depth_limited = True
                                 break
                         elif in_scope:
+                            check_time()
                             observe(path, await self.backend.text(path))
                             scanned += 1
                         position += 1

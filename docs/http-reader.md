@@ -225,7 +225,8 @@ scan of native typed `/fs/tree` pages (40 visible nodes per request, level limit
 file under an archive directory. Each call reports `scan_complete`,
 `scanned_files`, `depth_limited`, `offset` and `next_offset`. When the request or
 data budget, reaching `limit` matching documents, or the 40 KiB serialized-match
-budget (inside the 48 KiB tool output cap) stops a call, `next_offset` names the first unscanned visible node; the caller
+budget (inside the 48 KiB tool output cap), or a 12-second scan time budget
+(inside the 20-second reader deadline) stops a call, `next_offset` names the first unscanned visible node; the caller
 passes it back as `offset` and repeats until `scan_complete` is true. Matches
 cover only the scanned range, so `matches=[]` proves absence only together with
 `scan_complete=true` across the whole sequence, and `truncated` stays true until

@@ -1,4 +1,5 @@
 """Scoped offset paging contracts. Synthetic fixtures are not native backend proof."""
+import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
 import json
@@ -19,6 +20,7 @@ from ov_http.app import create_app, result, schema, SPECS
 from ov_http.auth import Principal, Refused
 from ov_http.config import (Config, RESOURCES_PROFILE, RESOURCES_REVISION,
                             LEGACY_URI_POLICY, RESOURCES_URI_POLICY)
+from ov_http import reader as reader_module
 from ov_http.reader import Backend, Reader, BROWSE_OFFSET_LIMIT, BROWSE_PAGE_LIMIT
 from test_http_acceptance import A, B, f, call, serving
 
@@ -38,6 +40,7 @@ class Pages:
         self.fault = None
         self.long_names = False
         self.texts = {}
+        self.delay = 0
 
     def paths(self, root, recursive, depth):
         files = self.files
@@ -96,6 +99,8 @@ class Pages:
         return httpx.Response(200, json=self.respond(request.url.path, dict(request.url.params)))
 
     async def http(self, request):
+        if self.delay and request.url.path.endswith("/content/read"):
+            await asyncio.sleep(self.delay)
         return JSONResponse(self.respond(request.url.path, dict(request.query_params)))
 
 
@@ -491,7 +496,8 @@ async def test_grep_offsets_need_one_directory_and_file_grants_scan_once():
 @pytest_asyncio.fixture
 async def sdk_pages(f):
     pages = Pages()
-    backend = Starlette(routes=[Route("/api/v1/fs/{path:path}", pages.http)])
+    backend = Starlette(routes=[Route("/api/v1/fs/{path:path}", pages.http),
+                                Route("/api/v1/content/{path:path}", pages.http)])
     async with serving(backend) as backend_port:
         cfg = replace(f.config, backend_url=f"http://127.0.0.1:{backend_port}/api/v1",
                       semantic_profile=RESOURCES_PROFILE, semantic_backend_revision=RESOURCES_REVISION,
@@ -538,3 +544,29 @@ async def test_sdk_pages_static_resources_and_reauthorizes_changed_tokens(sdk_pa
         response, _ = await call(session, tool, uri=file, **args)
         assert response.is_error and pages.calls[-1][1]["uri"] == file
         assert len(pages.calls) == before + 1
+
+
+@pytest.mark.asyncio
+async def test_sdk_grep_time_budget_yields_resumable_partial_results(sdk_pages, monkeypatch):
+    # Slow content reads must return progress and an offset, never a tool error.
+    fixture, pages = sdk_pages
+    ns = curator_layout(pages, archives=2)
+    pages.delay = 0.2
+    monkeypatch.setattr(reader_module, "GREP_TIME_BUDGET", 0.3)
+    found, offset, calls = [], 0, 0
+    async with fixture.session(fixture.token([ROOT])) as session:
+        assert "offset" in next(t for t in (await session.list_tools()).tools
+                                 if t.name == "memory_grep").input_schema["properties"]
+        while True:
+            response, value = await call(session, "memory_grep", uri=ns, offset=offset,
+                                         pattern="agent-access-on-normandy", limit=20)
+            assert not response.is_error, value
+            calls += 1
+            found += [m["uri"] for m in value["matches"]]
+            if value["next_offset"] is None:
+                break
+            assert not value["scan_complete"] and value["next_offset"] > offset
+            offset = value["next_offset"]
+    assert calls > 1 and value["scan_complete"] and not value["truncated"]
+    assert found == [ns + "/agent-access-on-normandy.md", ns + "/agent-access.md",
+                     ns + "/memory-curation-job.md"]
