@@ -547,12 +547,16 @@ async def test_sdk_pages_static_resources_and_reauthorizes_changed_tokens(sdk_pa
 
 
 @pytest.mark.asyncio
-async def test_sdk_grep_time_budget_yields_resumable_partial_results(sdk_pages, monkeypatch):
-    # Slow content reads must return progress and an offset, never a tool error.
+@pytest.mark.parametrize("delay,budget", [(0.2, 0.3), (0.4, 0.5), (1.5, 0.2)])
+async def test_sdk_grep_time_budget_yields_resumable_partial_results(sdk_pages, monkeypatch,
+                                                                     delay, budget):
+    # Slow content reads must return progress and an offset, never a tool error:
+    # (0.2, 0.3) yields between reads, (0.4, 0.5) yields while a read is in
+    # flight, and (1.5, 0.2) still advances one node per call.
     fixture, pages = sdk_pages
     ns = curator_layout(pages, archives=2)
-    pages.delay = 0.2
-    monkeypatch.setattr(reader_module, "GREP_TIME_BUDGET", 0.3)
+    pages.delay = delay
+    monkeypatch.setattr(reader_module, "GREP_TIME_BUDGET", budget)
     found, offset, calls = [], 0, 0
     async with fixture.session(fixture.token([ROOT])) as session:
         assert "offset" in next(t for t in (await session.list_tools()).tools

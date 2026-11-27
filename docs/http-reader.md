@@ -226,7 +226,8 @@ file under an archive directory. Each call reports `scan_complete`,
 `scanned_files`, `depth_limited`, `offset` and `next_offset`. When the request or
 data budget, reaching `limit` matching documents, or the 40 KiB serialized-match
 budget (inside the 48 KiB tool output cap), or a 12-second scan time budget
-(inside the 20-second reader deadline) stops a call, `next_offset` names the first unscanned visible node; the caller
+(inside the 20-second reader deadline) stops a call,
+including a backend request still in flight when that budget runs out, `next_offset` names the first unscanned visible node; the caller
 passes it back as `offset` and repeats until `scan_complete` is true. Matches
 cover only the scanned range, so `matches=[]` proves absence only together with
 `scan_complete=true` across the whole sequence, and `truncated` stays true until
@@ -236,7 +237,10 @@ level limit (12) stops the scan with `depth_limited=true` and no `next_offset`,
 because its children are unreachable; such a scan never reports completion.
 Archive directories excluded by `include_archived=false` do not count. Near the
 offset ceiling a call requests only the remaining range, as listings do.
-Offsets are best effort under concurrent edits, like listings. A file-only
+The node at the starting offset is always processed without the time bound, so
+every call advances; a single backend request that alone exceeds the 20-second
+reader deadline still returns the safe tool error. Offsets are best effort
+under concurrent edits, like listings. A file-only
 grant is read once and refuses a nonzero offset; multiple grants without an
 explicit directory URI keep the earlier bounded walk and refuse offsets.
 

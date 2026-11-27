@@ -1,5 +1,6 @@
 """Per-call scoped filesystem reader; never imports the broad stdio wrapper."""
 from pathlib import PurePosixPath
+import asyncio
 import json
 import math
 import time
@@ -481,10 +482,25 @@ class Reader:
         position, scan_complete, depth_limited = offset, False, False
         deadline = time.monotonic() + GREP_TIME_BUDGET
 
-        def check_time():
-            # Always allow progress past the starting offset before yielding.
-            if position > offset and time.monotonic() >= deadline:
+        async def bounded(coro):
+            # The starting node always runs unbounded, so every call makes
+            # progress. After that, each backend request must finish within
+            # the remaining scan time; otherwise the call yields at the
+            # current, unprocessed node instead of hitting the tool deadline.
+            if position == offset:
+                return await coro
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                coro.close()
                 raise BudgetExhausted()
+            timer = asyncio.timeout(remaining)
+            try:
+                async with timer:
+                    return await coro
+            except TimeoutError:
+                if timer.expired():
+                    raise BudgetExhausted() from None
+                raise
 
         try:
             st = await self.backend.stat(root)
@@ -499,8 +515,8 @@ class Reader:
                 while not depth_limited and position <= BROWSE_OFFSET_LIMIT:
                     # Same remaining-range cap as paged_listing at the ceiling.
                     page = min(BROWSE_PAGE_LIMIT, BROWSE_OFFSET_LIMIT + 1 - position)
-                    check_time()
-                    rows, more = await self.backend.browse_rows(root, True, page, position, 12)
+                    rows, more = await bounded(
+                        self.backend.browse_rows(root, True, page, position, 12))
                     for row in rows:
                         path = row["uri"]
                         in_scope = include_archived or not archived(path)
@@ -510,8 +526,7 @@ class Reader:
                                 depth_limited = True
                                 break
                         elif in_scope:
-                            check_time()
-                            observe(path, await self.backend.text(path))
+                            observe(path, await bounded(self.backend.text(path)))
                             scanned += 1
                         position += 1
                     else:
