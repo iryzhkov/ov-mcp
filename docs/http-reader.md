@@ -219,6 +219,39 @@ chunk hits by permitted document ancestor and hides archive namespaces by defaul
 It never groups a chunk-only grant to an ancestor outside that grant. There are
 no semantic scores and no claim of a complete store-wide count.
 
+Under the resources profile, grep over one authorized directory is a resumable
+scan of native typed `/fs/tree` pages (40 visible nodes per request, level limit
+12). It does not stat each node, and with `include_archived=false` it reads no
+file under an archive directory. Each call reports `scan_complete`,
+`scanned_files`, `depth_limited`, `offset` and `next_offset`. When the request or
+data budget, reaching `limit` matching documents, or the 40 KiB serialized-match
+budget (inside the 48 KiB tool output cap), or a 12-second scan time budget
+(inside the 20-second reader deadline) stops a call,
+including a backend request still in flight when that budget runs out, `next_offset` names the first unscanned visible node; the caller
+passes it back as `offset` and repeats until `scan_complete` is true. Matches
+cover only the scanned range, so `matches=[]` proves absence only together with
+`scan_complete=true` across the whole sequence, and `truncated` stays true until
+then. Completeness holds only for one sequence that starts at offset 0 and
+follows each returned `next_offset`. An in-scope directory at the native tree
+level limit (12) stops the scan with `depth_limited=true` and no `next_offset`,
+because its children are unreachable; such a scan never reports completion.
+Archive directories excluded by `include_archived=false` do not count. Near the
+offset ceiling a call requests only the remaining range, as listings do.
+The node at the starting offset is always processed without the scan time bound,
+so every call whose stopping condition is that budget advances. The setup stat,
+first page and first node still share the 20-second reader deadline; if they
+exhaust it, the call returns the safe tool error without a cursor. A single
+backend request that alone exceeds the 20-second
+reader deadline still returns the safe tool error. Offsets are best effort
+under concurrent edits, like listings. A file-only
+grant is read once and refuses a nonzero offset; multiple grants without an
+explicit directory URI keep the earlier bounded walk and refuse offsets.
+
+The earlier walk stat-ed every node under a 64-request discovery allowance. In
+November 2026 the openviking namespace held a large `archive/` directory sorting
+before the `memory-curation-*` notes, so the walk ran out inside the archive and
+returned `matches=[]` with `truncated=true` for literals those notes contained.
+
 Reads reconstruct visible chunks in natural name order, handle numbered verbatim
 containers, and support line offsets/limits and source-part lists. Markdown
 section order may differ from the ingested original. Abstract/overview explicitly
@@ -276,8 +309,9 @@ response allowance before I/O, so a scan may stop with less than that allowance
 unused. Tool output is at most 48 KiB; read text is at
 most 24,000 characters. Upstream redirects and compressed responses are refused.
 Traversal, request and aggregate-data budgets return safe partial scan results
-with explicit truncation. Grep and relations spend at most the first 64 requests
-on discovery to leave allowance for content. Partial sizes, matching-part counts,
+with explicit truncation. Relations and multi-root grep spend at most the first
+64 requests on discovery to leave allowance for content; single-directory grep
+under the resources profile pages instead and returns a resume offset. Partial sizes, matching-part counts,
 links and backlinks cover only validated observed records, not a complete scan.
 A backlink document contributes nothing until its assembly is complete. An
 incomplete requested document assembly fails rather than claiming full content.

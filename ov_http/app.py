@@ -72,6 +72,11 @@ def schema(name, profile="disabled"):
     if profile == RESOURCES_PROFILE and name in ("memory_ls", "memory_tree"):
         properties = {**properties, "offset": {"type": "integer", "minimum": 0, "maximum": 100000,
                       "description": "Visible-node offset. Reauthorized each call; best effort under concurrent edits. Page cap 40. Multiple grants require an explicit directory URI."}}
+    if profile == RESOURCES_PROFILE and name == "memory_grep":
+        properties = {**properties, "offset": {"type": "integer", "minimum": 0, "maximum": 100000,
+                      "description": "Resume a scan at next_offset from the previous call. Results cover only the scanned range; "
+                                     "repeat until scan_complete is true before treating absence as no match. "
+                                     "Best effort under concurrent edits. Multiple grants require an explicit directory URI."}}
     return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
 
 
@@ -252,7 +257,8 @@ def create_app(config: Config, *, jwks_ssl_context: ssl.SSLContext | None = None
                 elif name == "memory_grep":
                     value = await reader.grep(arguments["pattern"], arguments.get("uri"),
                                               arguments.get("case_insensitive", False), arguments.get("limit", 50),
-                                              arguments.get("group", True), arguments.get("include_archived", False))
+                                              arguments.get("group", True), arguments.get("include_archived", False),
+                                              arguments.get("offset", 0))
                 elif name == "memory_glob":
                     value = await reader.glob(arguments["pattern"], arguments.get("uri"),
                                               arguments.get("limit", 50))

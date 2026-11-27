@@ -1,4 +1,5 @@
 """Scoped offset paging contracts. Synthetic fixtures are not native backend proof."""
+import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
 import json
@@ -19,6 +20,7 @@ from ov_http.app import create_app, result, schema, SPECS
 from ov_http.auth import Principal, Refused
 from ov_http.config import (Config, RESOURCES_PROFILE, RESOURCES_REVISION,
                             LEGACY_URI_POLICY, RESOURCES_URI_POLICY)
+from ov_http import reader as reader_module
 from ov_http.reader import Backend, Reader, BROWSE_OFFSET_LIMIT, BROWSE_PAGE_LIMIT
 from test_http_acceptance import A, B, f, call, serving
 
@@ -37,6 +39,8 @@ class Pages:
         self.sizes = []
         self.fault = None
         self.long_names = False
+        self.texts = {}
+        self.delay = 0
 
     def paths(self, root, recursive, depth):
         files = self.files
@@ -55,7 +59,10 @@ class Pages:
         self.calls.append((path, params))
         uri = params["uri"]
         assert uri == ROOT or uri.startswith(ROOT + "/")
-        if path.endswith("/stat"):
+        if path.endswith("/content/read"):
+            assert uri in self.files and set(params) == {"uri"}
+            body = {"status": "ok", "result": self.texts.get(uri, "plain text " + uri)}
+        elif path.endswith("/stat"):
             body = {"status": "ok", "result": {
                 "uri": uri, "isDir": any(f.startswith(uri + "/") for f in self.files)
                 or self.long_names, "size": 0, "count": 999999,
@@ -92,6 +99,8 @@ class Pages:
         return httpx.Response(200, json=self.respond(request.url.path, dict(request.url.params)))
 
     async def http(self, request):
+        if self.delay and request.url.path.endswith("/content/read"):
+            await asyncio.sleep(self.delay)
         return JSONResponse(self.respond(request.url.path, dict(request.query_params)))
 
 
@@ -296,8 +305,8 @@ async def test_output_request_and_offset_ceiling_limits():
 def test_profile_specific_schema_preserves_legacy_catalog():
     for name in SPECS:
         assert ("offset" in schema(name, RESOURCES_PROFILE)["properties"]) == (
-            name in ("memory_ls", "memory_tree", "memory_read"))
-    for name in ("memory_ls", "memory_tree"):
+            name in ("memory_ls", "memory_tree", "memory_read", "memory_grep"))
+    for name in ("memory_ls", "memory_tree", "memory_grep"):
         for profile in ("disabled", "namespace-directories-v1"):
             with pytest.raises(jsonschema.ValidationError):
                 jsonschema.validate({"offset": 0}, schema(name, profile))
@@ -306,10 +315,189 @@ def test_profile_specific_schema_preserves_legacy_catalog():
                 jsonschema.validate({"offset": offset}, schema(name, RESOURCES_PROFILE))
 
 
+def curator_layout(pages, archives=150):
+    """Mirror the 2026-11 openviking namespace that defeated the per-node walk.
+
+    A large archive sorts between the first live notes and the exact-directory
+    notes that contain the literal, so a stat-per-node walk spent its discovery
+    allowance inside archive/ and reported matches=[] with truncated=true.
+    """
+    ns = A + "/openviking"
+    pages.files = {ns + "/agent-access-on-normandy.md/agent-access-on-normandy.md",
+                   ns + "/agent-access.md/agent-access.md",
+                   ns + "/memory-curation-job.md/0001/0000.md",
+                   ns + "/memory-curation-status.md/0001/0000.md",
+                   ns + "/zz-unrelated.md/0001/0000.md"}
+    pages.files |= {ns + f"/archive/backup-{i:03}.md/0001/0000.md" for i in range(archives)}
+    pages.texts = {
+        ns + "/agent-access-on-normandy.md/agent-access-on-normandy.md": "# agent-access-on-normandy",
+        ns + "/agent-access.md/agent-access.md": "See [[agent-access-on-normandy]].",
+        ns + "/memory-curation-job.md/0001/0000.md": "Related: [[agent-access-on-normandy]].",
+        ns + "/memory-curation-status.md/0001/0000.md":
+            "[[upkeeper-publication]] and viking://resources/homelab/upkeeper-publication.md",
+    }
+    pages.texts |= {p: "[[upkeeper-publication]] [[agent-access-on-normandy]]"
+                    for p in pages.files if "/archive/" in p}
+    return ns
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pattern,expected", [
+    ("upkeeper-publication", ["memory-curation-status.md"]),
+    ("agent-access-on-normandy", ["agent-access-on-normandy.md", "agent-access.md",
+                                  "memory-curation-job.md"]),
+])
+async def test_grep_reaches_exact_directory_notes_behind_a_large_archive(pattern, expected):
+    pages = Pages()
+    ns = curator_layout(pages)
+    async with reader(pages) as read:
+        value = await read.grep(pattern, ns, False, 20, True, False)
+        assert value["scan_complete"] is True and value["truncated"] is False
+        assert value["next_offset"] is None and value["scanned_files"] == 5
+        assert [m["uri"] for m in value["matches"]] == [ns + "/" + name for name in expected]
+        assert read.backend.requests <= 128
+    reads = [params["uri"] for path, params in pages.calls if path.endswith("/content/read")]
+    assert reads and not any("/archive/" in uri for uri in reads)
+    assert not any(path.endswith("/fs/ls") for path, _ in pages.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [3, 100])
+async def test_grep_resumes_at_next_offset_until_the_scan_is_complete(limit):
+    pages = Pages()
+    ns = curator_layout(pages)
+    async with reader(pages) as read:
+        archived = await read.grep("upkeeper-publication", ns, False, 100, True, True)
+    # Reading every archive file exceeds one call's 128-request budget.
+    assert archived["scan_complete"] is False and archived["truncated"] is True
+    assert archived["next_offset"] and not archived["continuation_limited"]
+    found, offset, calls = set(), 0, 0
+    while True:
+        async with reader(pages) as read:
+            value = await read.grep("upkeeper-publication", ns, False, limit, True, True, offset)
+            assert read.backend.requests <= 128 and value["returned"] <= limit
+        calls += 1
+        found |= {m["uri"] for m in value["matches"]}
+        if value["scan_complete"]:
+            assert value["next_offset"] is None and not value["truncated"]
+            break
+        assert value["truncated"] and value["next_offset"] > offset
+        offset = value["next_offset"]
+    assert calls > 1
+    expected = {ns + f"/archive/backup-{i:03}.md" for i in range(150)}
+    assert found == expected | {ns + "/memory-curation-status.md"}
+
+
+async def grep_sequence(pages, root, pattern, *, limit=100, group=True, include_archived=False):
+    """Follow next_offset from zero; return every call's result."""
+    values, offset = [], 0
+    while True:
+        async with reader(pages) as read:
+            value = await read.grep(pattern, root, False, limit, group, include_archived, offset)
+            assert read.backend.requests <= 128
+        assert not result(value).is_error
+        values.append(value)
+        if value["next_offset"] is None:
+            return values
+        assert value["next_offset"] > offset and not value["scan_complete"]
+        offset = value["next_offset"]
+
+
+def deep(root, levels):
+    return root + "".join(f"/d{i:02}" for i in range(levels))
+
+
+@pytest.mark.asyncio
+async def test_grep_depth_limit_is_never_completed_by_resuming():
+    pages = Pages()
+    ns = A + "/deep"
+    # Many early files exhaust the first call before the depth boundary.
+    pages.files = {ns + f"/a/early_{i:03}.md" for i in range(150)}
+    hidden = deep(ns + "/b", 12) + "/note.md"
+    pages.files |= {hidden, ns + "/c/late.md"}
+    pages.texts = {hidden: "needle"}
+    values = await grep_sequence(pages, ns, "needle")
+    assert len(values) > 1
+    last = values[-1]
+    assert last["depth_limited"] and not last["scan_complete"] and last["truncated"]
+    assert last["next_offset"] is None and last["continuation_limited"]
+    assert not any(v["scan_complete"] for v in values)
+    assert all(v["matches"] == [] for v in values)
+
+
+@pytest.mark.asyncio
+async def test_grep_excluded_archive_depth_does_not_block_completion():
+    pages = Pages()
+    ns = A + "/live"
+    pages.files = {deep(ns + "/archive", 12) + "/old.md", ns + "/note.md"}
+    pages.texts = {ns + "/note.md": "needle"}
+    [value] = await grep_sequence(pages, ns, "needle")
+    assert value["scan_complete"] and not value["depth_limited"] and not value["truncated"]
+    assert value["matches"] == [{"uri": ns + "/note.md", "matching_parts": 1}]
+    [archived] = await grep_sequence(pages, ns, "needle", include_archived=True)
+    assert archived["depth_limited"] and not archived["scan_complete"]
+
+
+@pytest.mark.asyncio
+async def test_grep_offset_ceiling_matches_listing():
+    pages = Pages()
+
+    def at_ceiling(body, tree, uri):
+        body.update(result=[{"uri": uri + "/edge.md", "isDir": False}], has_more=True)
+
+    pages.files = {A + "/edge.md"}
+    pages.fault = at_ceiling
+    async with reader(pages) as read:
+        value = await read.grep("needle", A, False, 5, True, False, BROWSE_OFFSET_LIMIT)
+    assert [p["node_limit"] for path, p in pages.calls if path.endswith("/tree")] == ["1"]
+    assert not value["scan_complete"] and value["next_offset"] is None
+    assert value["continuation_limited"] and value["scanned_files"] == 1
+
+
+@pytest.mark.asyncio
+async def test_grep_output_budget_returns_a_resumable_batch():
+    pages = Pages()
+    ns = A + "/long"
+    stem = ns + ("/" + "n" * 200) * 4
+    pages.files = {stem + f"/f{i:03}.md" for i in range(60)}
+    pages.texts = {p: "needle" for p in pages.files}
+    values = await grep_sequence(pages, ns, "needle", group=False)
+    assert len(values) > 1 and values[-1]["scan_complete"]
+    found = [m["uri"] for v in values for m in v["matches"]]
+    assert sorted(found) == sorted(pages.files) and len(found) == len(set(found))
+    assert all(m["matching_parts"] == 1 for v in values for m in v["matches"])
+    assert all(len(json.dumps(v).encode()) <= 49152 for v in values)
+
+
+@pytest.mark.asyncio
+async def test_grep_offsets_need_one_directory_and_file_grants_scan_once():
+    pages = Pages()
+    ns = curator_layout(pages, archives=2)
+    async with reader(pages, (A, B)) as read:
+        with pytest.raises(Refused):
+            await read.grep("needle", None, False, 5, True, False, 40)
+    assert not pages.calls
+    for offset in (-1, True, 100001):
+        async with reader(pages) as read:
+            with pytest.raises(Refused):
+                await read.grep("needle", ns, False, 5, True, False, offset)
+    assert not pages.calls
+    status = ns + "/memory-curation-status.md/0001/0000.md"
+    async with reader(pages, (status,)) as read:
+        value = await read.grep("UPKEEPER", None, True, 5, True, False)
+        assert value["scan_complete"] and value["matches"] == [{"uri": status, "matching_parts": 1}]
+        with pytest.raises(Refused):
+            await read.grep("UPKEEPER", None, True, 5, True, False, 1)
+    async with reader(pages, (B,)) as read:
+        with pytest.raises(Refused):
+            await read.grep("needle", ns, False, 5, True, False)
+
+
 @pytest_asyncio.fixture
 async def sdk_pages(f):
     pages = Pages()
-    backend = Starlette(routes=[Route("/api/v1/fs/{path:path}", pages.http)])
+    backend = Starlette(routes=[Route("/api/v1/fs/{path:path}", pages.http),
+                                Route("/api/v1/content/{path:path}", pages.http)])
     async with serving(backend) as backend_port:
         cfg = replace(f.config, backend_url=f"http://127.0.0.1:{backend_port}/api/v1",
                       semantic_profile=RESOURCES_PROFILE, semantic_backend_revision=RESOURCES_REVISION,
@@ -356,3 +544,56 @@ async def test_sdk_pages_static_resources_and_reauthorizes_changed_tokens(sdk_pa
         response, _ = await call(session, tool, uri=file, **args)
         assert response.is_error and pages.calls[-1][1]["uri"] == file
         assert len(pages.calls) == before + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delay,budget", [(0.2, 0.3), (0.4, 0.5), (1.5, 0.2)])
+async def test_sdk_grep_time_budget_yields_resumable_partial_results(sdk_pages, monkeypatch,
+                                                                     delay, budget):
+    # Slow content reads must return progress and an offset, never a tool error:
+    # (0.2, 0.3) yields between reads, (0.4, 0.5) yields while a read is in
+    # flight, and (1.5, 0.2) still advances one node per call.
+    fixture, pages = sdk_pages
+    ns = curator_layout(pages, archives=2)
+    pages.delay = delay
+    monkeypatch.setattr(reader_module, "GREP_TIME_BUDGET", budget)
+    found, offset, calls = [], 0, 0
+    async with fixture.session(fixture.token([ROOT])) as session:
+        assert "offset" in next(t for t in (await session.list_tools()).tools
+                                 if t.name == "memory_grep").input_schema["properties"]
+        while True:
+            response, value = await call(session, "memory_grep", uri=ns, offset=offset,
+                                         pattern="agent-access-on-normandy", limit=20)
+            assert not response.is_error, value
+            calls += 1
+            found += [m["uri"] for m in value["matches"]]
+            if value["next_offset"] is None:
+                break
+            assert not value["scan_complete"] and value["next_offset"] > offset
+            offset = value["next_offset"]
+    assert calls > 1 and value["scan_complete"] and not value["truncated"]
+    assert found == [ns + "/agent-access-on-normandy.md", ns + "/agent-access.md",
+                     ns + "/memory-curation-job.md"]
+
+
+@pytest.mark.asyncio
+async def test_sdk_grep_cuts_off_a_read_in_flight_at_the_budget(sdk_pages, monkeypatch):
+    # Start at the first file so its 1.0 s read is the unbounded starting node.
+    # The next read starts about 1.0 s in, inside the 1.3 s budget, and would
+    # end near 2.0 s. A check made only when a request starts would let it
+    # finish and report its match; the in-flight bound must cut it off and
+    # resume at that unread node.
+    fixture, pages = sdk_pages
+    ns = curator_layout(pages, archives=2)
+    nodes = pages.paths(ns, True, 12)
+    first = nodes.index(ns + "/agent-access-on-normandy.md/agent-access-on-normandy.md")
+    second = nodes.index(ns + "/agent-access.md/agent-access.md")
+    pages.delay = 1.0
+    monkeypatch.setattr(reader_module, "GREP_TIME_BUDGET", 1.3)
+    async with fixture.session(fixture.token([ROOT])) as session:
+        response, value = await call(session, "memory_grep", uri=ns, offset=first,
+                                     pattern="agent-access-on-normandy", limit=20)
+    assert not response.is_error, value
+    assert [m["uri"] for m in value["matches"]] == [ns + "/agent-access-on-normandy.md"]
+    assert value["scanned_files"] == 1 and value["next_offset"] == second
+    assert not value["scan_complete"] and value["truncated"]
